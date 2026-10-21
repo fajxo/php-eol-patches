@@ -69,6 +69,7 @@ BEGIN_EXTERN_C()
 
 /* startup/shutdown */
 ZEND_API void ZEND_FASTCALL _zend_hash_init(HashTable *ht, uint32_t nSize, dtor_func_t pDestructor, zend_bool persistent ZEND_FILE_LINE_DC);
+ZEND_API HashTable* ZEND_FASTCALL zend_new_array_singleton(void);
 ZEND_API void ZEND_FASTCALL _zend_hash_init_ex(HashTable *ht, uint32_t nSize, dtor_func_t pDestructor, zend_bool persistent, zend_bool bApplyProtection ZEND_FILE_LINE_DC);
 ZEND_API void ZEND_FASTCALL zend_hash_destroy(HashTable *ht);
 ZEND_API void ZEND_FASTCALL zend_hash_clean(HashTable *ht);
