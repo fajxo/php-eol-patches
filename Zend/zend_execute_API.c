@@ -289,6 +289,10 @@ void shutdown_executor(TSRMLS_D) /* {{{ */
 	zend_try {
 		zend_objects_store_free_object_storage(&EG(objects_store) TSRMLS_CC);
 
+		/* may be used by zend_error before init_executor */
+		EG(error_handling) = EH_NORMAL;
+		EG(exception) = NULL;
+
 		zend_vm_stack_destroy(TSRMLS_C);
 
 		/* Destroy all op arrays */
@@ -322,6 +326,11 @@ void shutdown_executor(TSRMLS_D) /* {{{ */
 		zend_ptr_stack_destroy(&EG(user_error_handlers));
 		zend_ptr_stack_destroy(&EG(user_exception_handlers));
 		zend_objects_store_destroy(&EG(objects_store));
+		/* may be used by zend_error before init_executor */
+		memset(&EG(user_error_handlers_error_reporting), 0, sizeof(EG(user_error_handlers_error_reporting)));
+		memset(&EG(user_error_handlers), 0, sizeof(EG(user_error_handlers)));
+		memset(&EG(user_exception_handlers), 0, sizeof(EG(user_exception_handlers)));
+		EG(objects_store).top = 1;
 		if (EG(in_autoload)) {
 			zend_hash_destroy(EG(in_autoload));
 			FREE_HASHTABLE(EG(in_autoload));

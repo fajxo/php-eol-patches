@@ -1016,6 +1016,16 @@ ZEND_API int _array_init(zval *arg, uint size ZEND_FILE_LINE_DC) /* {{{ */
 }
 /* }}} */
 
+ZEND_API int _array_init_singleton(zval *arg ZEND_FILE_LINE_DC) /* {{{ */
+{
+	_array_init(arg, 0 ZEND_FILE_LINE_RELAY_CC);
+	/* 2, not 1 as in PHP 7: in this hash implementation nTableMask == 0 marks
+	 * an unallocated bucket array (CHECK_INIT), and a table of 1 has mask 0. */
+	Z_ARRVAL_P(arg)->nTableSize = 2;
+	return SUCCESS;
+}
+/* }}} */
+
 static int zend_merge_property(zval **value TSRMLS_DC, int num_args, va_list args, const zend_hash_key *hash_key) /* {{{ */
 {
 	/* which name should a numeric property have ? */
