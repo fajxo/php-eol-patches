@@ -58,6 +58,19 @@
 #include <openssl/ssl.h>
 #include <openssl/pkcs12.h>
 
+/* OpenSSL 4.0 removed SSLv3 completely and no longer defines OPENSSL_NO_SSL3.
+ * Define it so SSLv3 is reported as unavailable, as with 1.1-3.x builds. */
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_SSL3)
+# define OPENSSL_NO_SSL3
+#endif
+
+/* OpenSSL 4.0 made ASN1_STRING opaque and removed ASN1_STRING_data() */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_data(s)
+#else
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_get0_data(s)
+#endif
+
 /* Common */
 #include <time.h>
 
@@ -776,7 +789,8 @@ static void add_assoc_name_entry(zval * val, char * key, X509_NAME * name, int s
 	}
 	
 	for (i = 0; i < X509_NAME_entry_count(name); i++) {
-		unsigned char *to_add;
+		const unsigned char *to_add = NULL;
+		unsigned char *to_add_buf = NULL;
 		int to_add_len = 0;
 
 
@@ -792,9 +806,10 @@ static void add_assoc_name_entry(zval * val, char * key, X509_NAME * name, int s
 
 		str = X509_NAME_ENTRY_get_data(ne);
 		if (ASN1_STRING_type(str) != V_ASN1_UTF8STRING) {
-			to_add_len = ASN1_STRING_to_UTF8(&to_add, str);
+			to_add_len = ASN1_STRING_to_UTF8(&to_add_buf, str);
+			to_add = to_add_buf;
 		} else {
-			to_add = ASN1_STRING_data(str);
+			to_add = PHP_OPENSSL_ASN1_DATA(str);
 			to_add_len = ASN1_STRING_length(str);
 		}
 
@@ -814,6 +829,9 @@ static void add_assoc_name_entry(zval * val, char * key, X509_NAME * name, int s
 				add_assoc_stringl(subitem, sname, (char *)to_add, to_add_len, 1);
 			}
 		}
+		if (to_add_buf != NULL) {
+			OPENSSL_free(to_add_buf);
+		}
 	}
 	if (key != NULL) {
 		zend_hash_update(HASH_OF(val), key, strlen(key) + 1, (void *)&subitem, sizeof(subitem), NULL);
@@ -823,7 +841,7 @@ static void add_assoc_name_entry(zval * val, char * key, X509_NAME * name, int s
 
 static void add_assoc_asn1_string(zval * val, char * key, ASN1_STRING * str) /* {{{ */
 {
-	add_assoc_stringl(val, key, (char *)str->data, str->length, 1);
+	add_assoc_stringl(val, key, (char *)PHP_OPENSSL_ASN1_DATA(str), ASN1_STRING_length(str), 1);
 }
 /* }}} */
 
@@ -847,22 +865,22 @@ static time_t asn1_time_to_time_t(ASN1_UTCTIME * timestr TSRMLS_DC) /* {{{ */
 		return (time_t)-1;
 	}
 
-	if (ASN1_STRING_length(timestr) != strlen((const char*)ASN1_STRING_data(timestr))) {
+	if (ASN1_STRING_length(timestr) != strlen((const char*)PHP_OPENSSL_ASN1_DATA(timestr))) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "illegal length in timestamp");
 		return (time_t)-1;
 	}
 
 	if (ASN1_STRING_length(timestr) < 13) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "unable to parse time string %s correctly", timestr->data);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "unable to parse time string %s correctly", (const char *)PHP_OPENSSL_ASN1_DATA(timestr));
 		return (time_t)-1;
 	}
 
 	if (ASN1_STRING_type(timestr) == V_ASN1_GENERALIZEDTIME && ASN1_STRING_length(timestr) < 15) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "unable to parse time string %s correctly", timestr->data);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "unable to parse time string %s correctly", (const char *)PHP_OPENSSL_ASN1_DATA(timestr));
 		return (time_t)-1;
 	}
 
-	strbuf = estrdup((char *)ASN1_STRING_data(timestr));
+	strbuf = estrdup((char *)PHP_OPENSSL_ASN1_DATA(timestr));
 
 	memset(&thetime, 0, sizeof(thetime));
 
@@ -1872,7 +1890,7 @@ PHP_FUNCTION(openssl_spki_export_challenge)
 		goto cleanup;
 	}
 
-	RETVAL_STRING((char *) ASN1_STRING_data(spki->spkac->challenge), 1);
+	RETVAL_STRING((char *) PHP_OPENSSL_ASN1_DATA(spki->spkac->challenge), 1);
 	goto cleanup;
 
 cleanup:
@@ -2052,8 +2070,8 @@ static int openssl_x509v3_subjectAltName(BIO *bio, X509_EXTENSION *extension)
 	}
 
 	extension_data = X509_EXTENSION_get_data(extension);
-	p = extension_data->data;
-	length = extension_data->length;
+	p = PHP_OPENSSL_ASN1_DATA(extension_data);
+	length = ASN1_STRING_length(extension_data);
 	if (method->it) {
 		names = (GENERAL_NAMES*)(ASN1_item_d2i(NULL, &p, length,
 						       ASN1_ITEM_ptr(method->it)));
@@ -2073,19 +2091,19 @@ static int openssl_x509v3_subjectAltName(BIO *bio, X509_EXTENSION *extension)
 				case GEN_EMAIL:
 					BIO_puts(bio, "email:");
 					as = name->d.rfc822Name;
-					BIO_write(bio, ASN1_STRING_data(as),
+					BIO_write(bio, PHP_OPENSSL_ASN1_DATA(as),
 						  ASN1_STRING_length(as));
 					break;
 				case GEN_DNS:
 					BIO_puts(bio, "DNS:");
 					as = name->d.dNSName;
-					BIO_write(bio, ASN1_STRING_data(as),
+					BIO_write(bio, PHP_OPENSSL_ASN1_DATA(as),
 						  ASN1_STRING_length(as));
 					break;
 				case GEN_URI:
 					BIO_puts(bio, "URI:");
 					as = name->d.uniformResourceIdentifier;
-					BIO_write(bio, ASN1_STRING_data(as),
+					BIO_write(bio, PHP_OPENSSL_ASN1_DATA(as),
 						  ASN1_STRING_length(as));
 					break;
 				default:
