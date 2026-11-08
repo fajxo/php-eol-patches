@@ -1500,9 +1500,12 @@ static int phar_call_openssl_signverify(int is_sign, php_stream *fp, off_t end, 
 			}
 			efree(retval_ptr);
 			return FAILURE;
-		case IS_BOOL:
+		case IS_BOOL: {
+			/* read the result before freeing the zval that holds it */
+			zend_bool ok = Z_BVAL_P(retval_ptr);
+
 			efree(retval_ptr);
-			if (Z_BVAL_P(retval_ptr)) {
+			if (ok) {
 				*signature = estrndup(Z_STRVAL_P(zsig), Z_STRLEN_P(zsig));
 				*signature_len = Z_STRLEN_P(zsig);
 				zval_dtor(zsig);
@@ -1512,6 +1515,7 @@ static int phar_call_openssl_signverify(int is_sign, php_stream *fp, off_t end, 
 			zval_dtor(zsig);
 			efree(zsig);
 			return FAILURE;
+		}
 	}
 }
 /* }}} */
