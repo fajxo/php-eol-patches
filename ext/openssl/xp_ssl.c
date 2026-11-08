@@ -37,6 +37,19 @@
 #include <openssl/x509v3.h>
 #include <openssl/err.h>
 
+/* OpenSSL 4.0 removed SSLv3 completely and no longer defines OPENSSL_NO_SSL3.
+ * Define it so SSLv3 is reported as unavailable, as with 1.1-3.x builds. */
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_SSL3)
+# define OPENSSL_NO_SSL3
+#endif
+
+/* OpenSSL 4.0 made ASN1_STRING opaque and removed ASN1_STRING_data() */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_data(s)
+#else
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_get0_data(s)
+#endif
+
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
 #include <openssl/bn.h>
 #include <openssl/dh.h>
@@ -432,12 +445,12 @@ static zend_bool php_openssl_matches_san_list(X509 *peer, const char *subject_na
 			}
 			OPENSSL_free(cert_name);
 		} else if (san->type == GEN_IPADD) {
-			if (san->d.iPAddress->length == 4) {
+			if (ASN1_STRING_length(san->d.iPAddress) == 4) {
 				sprintf(ipbuffer, "%d.%d.%d.%d",
-					san->d.iPAddress->data[0],
-					san->d.iPAddress->data[1],
-					san->d.iPAddress->data[2],
-					san->d.iPAddress->data[3]
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[0],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[1],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[2],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[3]
 				);
 				if (strcasecmp(subject_name, (const char*)ipbuffer) == 0) {
 					sk_GENERAL_NAME_pop_free(alt_names, GENERAL_NAME_free);
@@ -955,6 +968,35 @@ static int php_openssl_set_local_cert(SSL_CTX *ctx, php_stream *stream) /* {{{ *
 }
 /* }}} */
 
+/* OpenSSL 4.0 removed the fixed-version methods (SSLv3_method(),
+ * TLSv1_method(), TLSv1_1_method(), TLSv1_2_method() and their client/server
+ * variants, deprecated since 1.1.0). Since 1.1.0 each of them was the
+ * version-flexible method pinned to one protocol version, so do the same:
+ * TLS_{client,server}_method() here, min = max protocol version in
+ * php_openssl_setup_crypto() once the context exists. */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+# define PHP_OPENSSL_PINNED_METHODS 1
+# define PHP_OPENSSL_FIXED_METHOD(is_client, client_method, server_method) \
+	((is_client) ? TLS_client_method() : TLS_server_method())
+
+static int php_openssl_get_pinned_proto_version(zend_long method_value) /* {{{ */
+{
+	switch (method_value) {
+#if !defined(OPENSSL_NO_SSL3) && defined(SSL3_VERSION)
+		case STREAM_CRYPTO_METHOD_SSLv3:   return SSL3_VERSION;
+#endif
+		case STREAM_CRYPTO_METHOD_TLSv1_0: return TLS1_VERSION;
+		case STREAM_CRYPTO_METHOD_TLSv1_1: return TLS1_1_VERSION;
+		case STREAM_CRYPTO_METHOD_TLSv1_2: return TLS1_2_VERSION;
+		default:                           return 0;
+	}
+}
+/* }}} */
+#else
+# define PHP_OPENSSL_FIXED_METHOD(is_client, client_method, server_method) \
+	((is_client) ? client_method() : server_method())
+#endif
+
 static const SSL_METHOD *php_openssl_select_crypto_method(zend_long method_value, int is_client) /* {{{ */
 {
 	if (method_value == STREAM_CRYPTO_METHOD_SSLv2) {
@@ -963,17 +1005,17 @@ static const SSL_METHOD *php_openssl_select_crypto_method(zend_long method_value
 		return NULL;
 	} else if (method_value == STREAM_CRYPTO_METHOD_SSLv3) {
 #ifdef HAVE_SSL3
-		return is_client ? SSLv3_client_method() : SSLv3_server_method();
+		return PHP_OPENSSL_FIXED_METHOD(is_client, SSLv3_client_method, SSLv3_server_method);
 #else
 		php_error_docref(NULL, E_WARNING,
 				"SSLv3 unavailable in the OpenSSL library against which PHP is linked");
 		return NULL;
 #endif
 	} else if (method_value == STREAM_CRYPTO_METHOD_TLSv1_0) {
-		return is_client ? TLSv1_client_method() : TLSv1_server_method();
+		return PHP_OPENSSL_FIXED_METHOD(is_client, TLSv1_client_method, TLSv1_server_method);
 	} else if (method_value == STREAM_CRYPTO_METHOD_TLSv1_1) {
 #ifdef HAVE_TLS11
-		return is_client ? TLSv1_1_client_method() : TLSv1_1_server_method();
+		return PHP_OPENSSL_FIXED_METHOD(is_client, TLSv1_1_client_method, TLSv1_1_server_method);
 #else
 		php_error_docref(NULL, E_WARNING,
 				"TLSv1.1 unavailable in the OpenSSL library against which PHP is linked");
@@ -981,7 +1023,7 @@ static const SSL_METHOD *php_openssl_select_crypto_method(zend_long method_value
 #endif
 	} else if (method_value == STREAM_CRYPTO_METHOD_TLSv1_2) {
 #ifdef HAVE_TLS12
-		return is_client ? TLSv1_2_client_method() : TLSv1_2_server_method();
+		return PHP_OPENSSL_FIXED_METHOD(is_client, TLSv1_2_client_method, TLSv1_2_server_method);
 #else
 		php_error_docref(NULL, E_WARNING,
 				"TLSv1.2 unavailable in the OpenSSL library against which PHP is linked");
@@ -1548,6 +1590,9 @@ int php_openssl_setup_crypto(php_stream *stream,
 		php_stream_xport_crypto_param *cparam) /* {{{ */
 {
 	const SSL_METHOD *method;
+#ifdef PHP_OPENSSL_PINNED_METHODS
+	int pinned_version = 0;
+#endif
 	int ssl_ctx_options;
 	int method_flags;
 	char *cipherlist = NULL;
@@ -1577,6 +1622,9 @@ int php_openssl_setup_crypto(php_stream *stream,
 		if (method == NULL) {
 			return FAILURE;
 		}
+#ifdef PHP_OPENSSL_PINNED_METHODS
+		pinned_version = php_openssl_get_pinned_proto_version(method_flags);
+#endif
 	} else {
 		method = sslsock->is_client ? SSLv23_client_method() : SSLv23_server_method();
 		ssl_ctx_options = php_openssl_get_crypto_method_ctx_flags(method_flags);
@@ -1591,6 +1639,17 @@ int php_openssl_setup_crypto(php_stream *stream,
 		php_error_docref(NULL, E_WARNING, "SSL context creation failure");
 		return FAILURE;
 	}
+
+#ifdef PHP_OPENSSL_PINNED_METHODS
+	if (pinned_version != 0 &&
+			(!SSL_CTX_set_min_proto_version(sslsock->ctx, pinned_version) ||
+			 !SSL_CTX_set_max_proto_version(sslsock->ctx, pinned_version))) {
+		php_error_docref(NULL, E_WARNING, "Unable to limit the SSL context to the requested protocol version");
+		SSL_CTX_free(sslsock->ctx);
+		sslsock->ctx = NULL;
+		return FAILURE;
+	}
+#endif
 
 	if (GET_VER_OPT("no_ticket") && zend_is_true(val)) {
 		ssl_ctx_options |= SSL_OP_NO_TICKET;

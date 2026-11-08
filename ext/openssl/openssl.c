@@ -57,6 +57,12 @@
 #include <openssl/ssl.h>
 #include <openssl/pkcs12.h>
 
+/* OpenSSL 4.0 removed SSLv3 completely and no longer defines OPENSSL_NO_SSL3.
+ * Define it so SSLv3 is reported as unavailable, as with 1.1-3.x builds. */
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_SSL3)
+# define OPENSSL_NO_SSL3
+#endif
+
 /* Common */
 #include <time.h>
 
@@ -910,7 +916,7 @@ static void php_openssl_add_assoc_name_entry(zval * val, char * key, X509_NAME *
 
 static void php_openssl_add_assoc_asn1_string(zval * val, char * key, ASN1_STRING * str) /* {{{ */
 {
-	add_assoc_stringl(val, key, (char *)str->data, str->length);
+	add_assoc_stringl(val, key, (char *)ASN1_STRING_get0_data(str), ASN1_STRING_length(str));
 }
 /* }}} */
 
@@ -943,12 +949,12 @@ static time_t php_openssl_asn1_time_to_time_t(ASN1_UTCTIME * timestr) /* {{{ */
 	}
 
 	if (timestr_len < 13 && timestr_len != 11) {
-		php_error_docref(NULL, E_WARNING, "unable to parse time string %s correctly", timestr->data);
+		php_error_docref(NULL, E_WARNING, "unable to parse time string %s correctly", (const char *)ASN1_STRING_get0_data(timestr));
 		return (time_t)-1;
 	}
 
 	if (ASN1_STRING_type(timestr) == V_ASN1_GENERALIZEDTIME && timestr_len < 15) {
-		php_error_docref(NULL, E_WARNING, "unable to parse time string %s correctly", timestr->data);
+		php_error_docref(NULL, E_WARNING, "unable to parse time string %s correctly", (const char *)ASN1_STRING_get0_data(timestr));
 		return (time_t)-1;
 	}
 
@@ -2238,8 +2244,8 @@ static int openssl_x509v3_subjectAltName(BIO *bio, X509_EXTENSION *extension)
 	}
 
 	extension_data = X509_EXTENSION_get_data(extension);
-	p = extension_data->data;
-	length = extension_data->length;
+	p = ASN1_STRING_get0_data(extension_data);
+	length = ASN1_STRING_length(extension_data);
 	if (method->it) {
 		names = (GENERAL_NAMES*) (ASN1_item_d2i(NULL, &p, length,
 			ASN1_ITEM_ptr(method->it)));
