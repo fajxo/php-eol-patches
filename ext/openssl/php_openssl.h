@@ -66,6 +66,12 @@ extern zend_module_entry openssl_module_entry;
 
 #include <openssl/err.h>
 
+/* OpenSSL 4.0 no longer exports ERR_NUM_ERRORS. It only sizes PHP's own error
+ * ring buffer here; keep the 1.0-3.x value. */
+#ifndef ERR_NUM_ERRORS
+# define ERR_NUM_ERRORS 16
+#endif
+
 #ifdef PHP_WIN32
 #	define PHP_OPENSSL_API __declspec(dllexport)
 #elif defined(__GNUC__) && __GNUC__ >= 4

@@ -36,6 +36,19 @@
 #include <openssl/x509v3.h>
 #include <openssl/err.h>
 
+/* OpenSSL 4.0 removed SSLv3 completely and no longer defines OPENSSL_NO_SSL3.
+ * Define it so SSLv3 is reported as unavailable, as with 1.1-3.x builds. */
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_SSL3)
+# define OPENSSL_NO_SSL3
+#endif
+
+/* OpenSSL 4.0 made ASN1_STRING opaque and removed ASN1_STRING_data() */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2070000fL)
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_data(s)
+#else
+# define PHP_OPENSSL_ASN1_DATA(s) ASN1_STRING_get0_data(s)
+#endif
+
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
 #include <openssl/bn.h>
 #include <openssl/dh.h>
@@ -455,12 +468,12 @@ static zend_bool php_openssl_matches_san_list(X509 *peer, const char *subject_na
 			}
 			OPENSSL_free(cert_name);
 		} else if (san->type == GEN_IPADD) {
-			if (san->d.iPAddress->length == 4) {
+			if (ASN1_STRING_length(san->d.iPAddress) == 4) {
 				sprintf(ipbuffer, "%d.%d.%d.%d",
-					san->d.iPAddress->data[0],
-					san->d.iPAddress->data[1],
-					san->d.iPAddress->data[2],
-					san->d.iPAddress->data[3]
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[0],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[1],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[2],
+					PHP_OPENSSL_ASN1_DATA(san->d.iPAddress)[3]
 				);
 				if (strcasecmp(subject_name, (const char*)ipbuffer) == 0) {
 					sk_GENERAL_NAME_pop_free(alt_names, GENERAL_NAME_free);
