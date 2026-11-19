@@ -186,7 +186,7 @@ static php_stream *php_stream_url_wrap_http_ex(php_stream_wrapper *wrapper,
 			return NULL;
 		}
 
-		use_ssl = resource->scheme && (ZSTR_LEN(resource->scheme) > 4) && ZSTR_VAL(resource->scheme)[4] == 's';
+		use_ssl = resource->scheme && zend_string_equals_literal_ci(resource->scheme, "https");
 		/* choose default ports */
 		if (use_ssl && resource->port == 0)
 			resource->port = 443;
