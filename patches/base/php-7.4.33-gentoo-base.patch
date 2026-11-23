@@ -1,0 +1,309 @@
+diff --git a/build/php.m4 b/build/php.m4
+index 86b522a3984515e8b153ee051c5c5fb6478f0067..3f72cffc02c7484e8e9f575972beb058a33804a5 100644
+--- a/build/php.m4
++++ b/build/php.m4
+@@ -275,25 +275,25 @@ dnl
+ dnl Checks for -R, etc. switch.
+ dnl
+ AC_DEFUN([PHP_RUNPATH_SWITCH],[
+-AC_MSG_CHECKING([if compiler supports -R])
+-AC_CACHE_VAL(php_cv_cc_dashr,[
++AC_MSG_CHECKING([if compiler supports -Wl,-rpath,])
++AC_CACHE_VAL(php_cv_cc_rpath,[
+   SAVE_LIBS=$LIBS
+-  LIBS="-R /usr/$PHP_LIBDIR $LIBS"
+-  AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],[php_cv_cc_dashr=yes],[php_cv_cc_dashr=no])
++  LIBS="-Wl,-rpath,/usr/$PHP_LIBDIR $LIBS"
++  AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],[php_cv_cc_rpath=yes],[php_cv_cc_rpath=no])
+   LIBS=$SAVE_LIBS])
+-AC_MSG_RESULT([$php_cv_cc_dashr])
+-if test $php_cv_cc_dashr = "yes"; then
+-  ld_runpath_switch=-R
++AC_MSG_RESULT([$php_cv_cc_rpath])
++if test $php_cv_cc_rpath = "yes"; then
++  ld_runpath_switch=-Wl,-rpath,
+ else
+-  AC_MSG_CHECKING([if compiler supports -Wl,-rpath,])
+-  AC_CACHE_VAL(php_cv_cc_rpath,[
++  AC_MSG_CHECKING([if compiler supports -R])
++  AC_CACHE_VAL(php_cv_cc_dashr,[
+     SAVE_LIBS=$LIBS
+-    LIBS="-Wl,-rpath,/usr/$PHP_LIBDIR $LIBS"
+-    AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],[php_cv_cc_rpath=yes],[php_cv_cc_rpath=no])
++    LIBS="-R /usr/$PHP_LIBDIR $LIBS"
++    AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],[php_cv_cc_dashr=yes],[php_cv_cc_dashr=no])
+     LIBS=$SAVE_LIBS])
+-  AC_MSG_RESULT([$php_cv_cc_rpath])
+-  if test $php_cv_cc_rpath = "yes"; then
+-    ld_runpath_switch=-Wl,-rpath,
++  AC_MSG_RESULT([$php_cv_cc_dashr])
++  if test $php_cv_cc_dashr = "yes"; then
++    ld_runpath_switch=-R
+   else
+     dnl Something innocuous.
+     ld_runpath_switch=-L
+diff --git a/ext/libxml/libxml.c b/ext/libxml/libxml.c
+index d343135b98d3714c9ea34256feb02260fb831a49..58f1829abdc4a3499c8d7472c5c260808449a2be 100644
+--- a/ext/libxml/libxml.c
++++ b/ext/libxml/libxml.c
+@@ -476,7 +476,7 @@ php_libxml_input_buffer_create_filename(const char *URI, xmlCharEncoding enc)
+ static xmlOutputBufferPtr
+ php_libxml_output_buffer_create_filename(const char *URI,
+                               xmlCharEncodingHandlerPtr encoder,
+-                              int compression ATTRIBUTE_UNUSED)
++                              int compression)
+ {
+ 	xmlOutputBufferPtr ret;
+ 	xmlURIPtr puri;
+diff --git a/ext/openssl/openssl.c b/ext/openssl/openssl.c
+index aa819be42242f5345d111c33fe58534685f96da5..9866bf5d8e4ff4fdb93b4a53b8770ec359d7f0cc 100644
+--- a/ext/openssl/openssl.c
++++ b/ext/openssl/openssl.c
+@@ -1517,7 +1517,6 @@ PHP_MINIT_FUNCTION(openssl)
+ 	REGISTER_LONG_CONSTANT("PKCS7_NOSIGS", PKCS7_NOSIGS, CONST_CS|CONST_PERSISTENT);
+ 
+ 	REGISTER_LONG_CONSTANT("OPENSSL_PKCS1_PADDING", RSA_PKCS1_PADDING, CONST_CS|CONST_PERSISTENT);
+-	REGISTER_LONG_CONSTANT("OPENSSL_SSLV23_PADDING", RSA_SSLV23_PADDING, CONST_CS|CONST_PERSISTENT);
+ 	REGISTER_LONG_CONSTANT("OPENSSL_NO_PADDING", RSA_NO_PADDING, CONST_CS|CONST_PERSISTENT);
+ 	REGISTER_LONG_CONSTANT("OPENSSL_PKCS1_OAEP_PADDING", RSA_PKCS1_OAEP_PADDING, CONST_CS|CONST_PERSISTENT);
+ 
+diff --git a/ext/pdo_odbc/config.m4 b/ext/pdo_odbc/config.m4
+index 72b604199bf722511c099e50446111a907e29980..d7c911ea7d6738204ec4adff12b3235dfc188514 100644
+--- a/ext/pdo_odbc/config.m4
++++ b/ext/pdo_odbc/config.m4
+@@ -85,6 +85,10 @@ if test "$PHP_PDO_ODBC" != "no"; then
+     PDO_ODBC_LIBDIR="$pdo_odbc_def_libdir"
+   fi
+ 
++  if test "$pdo_odbc_def_lib" = "iodbc" ; then
++    PDO_ODBC_INCDIR="$PDO_ODBC_INCDIR/iodbc"
++  fi
++
+   AC_MSG_RESULT([$pdo_odbc_flavour
+           libs       $PDO_ODBC_LIBDIR,
+           headers    $PDO_ODBC_INCDIR])
+diff --git a/ext/pdo_sqlite/sqlite_driver.c b/ext/pdo_sqlite/sqlite_driver.c
+index 0595bd09feb526f8d5d63a50d2ae6ace5b27cb4f..54f9d05e1e29e65dd6c64e83e09a5f5b0acfde05 100644
+--- a/ext/pdo_sqlite/sqlite_driver.c
++++ b/ext/pdo_sqlite/sqlite_driver.c
+@@ -233,6 +233,9 @@ static char *pdo_sqlite_last_insert_id(pdo_dbh_t *dbh, const char *name, size_t
+ /* NB: doesn't handle binary strings... use prepared stmts for that */
+ static int sqlite_handle_quoter(pdo_dbh_t *dbh, const char *unquoted, size_t unquotedlen, char **quoted, size_t *quotedlen, enum pdo_param_type paramtype )
+ {
++	if (unquotedlen > (INT_MAX - 3) / 2) {
++		return 0;
++	}
+ 	*quoted = safe_emalloc(2, unquotedlen, 3);
+ 	sqlite3_snprintf(2*unquotedlen + 3, *quoted, "'%q'", unquoted);
+ 	*quotedlen = strlen(*quoted);
+diff --git a/ext/pdo_sqlite/tests/bug81740.phpt b/ext/pdo_sqlite/tests/bug81740.phpt
+new file mode 100644
+index 0000000000000000000000000000000000000000..99fb07c3048b0ee9475a469fff288ac165610e15
+--- /dev/null
++++ b/ext/pdo_sqlite/tests/bug81740.phpt
+@@ -0,0 +1,17 @@
++--TEST--
++Bug #81740 (PDO::quote() may return unquoted string)
++--SKIPIF--
++<?php
++if (!extension_loaded('pdo_sqlite')) print 'skip not loaded';
++if (getenv("SKIP_SLOW_TESTS")) die("skip slow test");
++?>
++--INI--
++memory_limit=-1
++--FILE--
++<?php
++$pdo = new PDO("sqlite::memory:");
++$string = str_repeat("a", 0x80000000);
++var_dump($pdo->quote($string));
++?>
++--EXPECT--
++bool(false)
+diff --git a/ext/standard/crypt.c b/ext/standard/crypt.c
+index 92430b69f7726362b0636b7368367d6cb32a5e69..04487f3fe5a72e0d0fdc61e612e7e19790576297 100644
+--- a/ext/standard/crypt.c
++++ b/ext/standard/crypt.c
+@@ -151,6 +151,7 @@ PHPAPI zend_string *php_crypt(const char *password, const int pass_len, const ch
+ 		} else if (
+ 				salt[0] == '$' &&
+ 				salt[1] == '2' &&
++				salt[2] != 0 &&
+ 				salt[3] == '$') {
+ 			char output[PHP_MAX_SALT_LEN + 1];
+ 
+diff --git a/ext/standard/crypt_blowfish.c b/ext/standard/crypt_blowfish.c
+index c1f945f29edd4d47168018476724a9bda003bbad..aa7e1bc2e68941e3ec23eaecd8da9ed4bc87add1 100644
+--- a/ext/standard/crypt_blowfish.c
++++ b/ext/standard/crypt_blowfish.c
+@@ -376,7 +376,6 @@ static unsigned char BF_atoi64[0x60] = {
+ #define BF_safe_atoi64(dst, src) \
+ { \
+ 	tmp = (unsigned char)(src); \
+-	if (tmp == '$') break; /* PHP hack */ \
+ 	if ((unsigned int)(tmp -= 0x20) >= 0x60) return -1; \
+ 	tmp = BF_atoi64[tmp]; \
+ 	if (tmp > 63) return -1; \
+@@ -404,13 +403,6 @@ static int BF_decode(BF_word *dst, const char *src, int size)
+ 		*dptr++ = ((c3 & 0x03) << 6) | c4;
+ 	} while (dptr < end);
+ 
+-	if (end - dptr == size) {
+-		return -1;
+-	}
+-
+-	while (dptr < end) /* PHP hack */
+-		*dptr++ = 0;
+-
+ 	return 0;
+ }
+ 
+diff --git a/ext/standard/tests/crypt/bcrypt_salt_dollar.phpt b/ext/standard/tests/crypt/bcrypt_salt_dollar.phpt
+new file mode 100644
+index 0000000000000000000000000000000000000000..32e335f4b087eceda5a57ca1e0b55952660800c1
+--- /dev/null
++++ b/ext/standard/tests/crypt/bcrypt_salt_dollar.phpt
+@@ -0,0 +1,82 @@
++--TEST--
++bcrypt correctly rejects salts containing $
++--FILE--
++<?php
++for ($i = 0; $i < 23; $i++) {
++	$salt = '$2y$04$' . str_repeat('0', $i) . '$';
++	$result = crypt("foo", $salt);
++	var_dump($salt);
++	var_dump($result);
++	var_dump($result === $salt);
++}
++?>
++--EXPECT--
++string(8) "$2y$04$$"
++string(2) "*0"
++bool(false)
++string(9) "$2y$04$0$"
++string(2) "*0"
++bool(false)
++string(10) "$2y$04$00$"
++string(2) "*0"
++bool(false)
++string(11) "$2y$04$000$"
++string(2) "*0"
++bool(false)
++string(12) "$2y$04$0000$"
++string(2) "*0"
++bool(false)
++string(13) "$2y$04$00000$"
++string(2) "*0"
++bool(false)
++string(14) "$2y$04$000000$"
++string(2) "*0"
++bool(false)
++string(15) "$2y$04$0000000$"
++string(2) "*0"
++bool(false)
++string(16) "$2y$04$00000000$"
++string(2) "*0"
++bool(false)
++string(17) "$2y$04$000000000$"
++string(2) "*0"
++bool(false)
++string(18) "$2y$04$0000000000$"
++string(2) "*0"
++bool(false)
++string(19) "$2y$04$00000000000$"
++string(2) "*0"
++bool(false)
++string(20) "$2y$04$000000000000$"
++string(2) "*0"
++bool(false)
++string(21) "$2y$04$0000000000000$"
++string(2) "*0"
++bool(false)
++string(22) "$2y$04$00000000000000$"
++string(2) "*0"
++bool(false)
++string(23) "$2y$04$000000000000000$"
++string(2) "*0"
++bool(false)
++string(24) "$2y$04$0000000000000000$"
++string(2) "*0"
++bool(false)
++string(25) "$2y$04$00000000000000000$"
++string(2) "*0"
++bool(false)
++string(26) "$2y$04$000000000000000000$"
++string(2) "*0"
++bool(false)
++string(27) "$2y$04$0000000000000000000$"
++string(2) "*0"
++bool(false)
++string(28) "$2y$04$00000000000000000000$"
++string(2) "*0"
++bool(false)
++string(29) "$2y$04$000000000000000000000$"
++string(2) "*0"
++bool(false)
++string(30) "$2y$04$0000000000000000000000$"
++string(60) "$2y$04$000000000000000000000u2a2UpVexIt9k3FMJeAVr3c04F5tcI8K"
++bool(false)
+diff --git a/ext/standard/tests/password/password_bcrypt_short.phpt b/ext/standard/tests/password/password_bcrypt_short.phpt
+new file mode 100644
+index 0000000000000000000000000000000000000000..085bc8a239045dd0ef7659cf6095e534e9c966b5
+--- /dev/null
++++ b/ext/standard/tests/password/password_bcrypt_short.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++Test that password_hash() does not overread buffers when a short hash is passed
++--FILE--
++<?php
++var_dump(password_verify("foo", '$2'));
++?>
++--EXPECT--
++bool(false)
+diff --git a/main/main.c b/main/main.c
+index 0b33b2b56c9a9d2474dab6b2e65e14ca14ab95b9..d8c465988cca588b90d32bfa6b98bb7cdc2e5974 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -836,6 +836,7 @@ PHP_INI_BEGIN()
+ 	PHP_INI_ENTRY("disable_functions",			"",			PHP_INI_SYSTEM,		NULL)
+ 	PHP_INI_ENTRY("disable_classes",			"",			PHP_INI_SYSTEM,		NULL)
+ 	PHP_INI_ENTRY("max_file_uploads",			"20",			PHP_INI_SYSTEM|PHP_INI_PERDIR,		NULL)
++	PHP_INI_ENTRY("max_multipart_body_parts",	"-1",			PHP_INI_SYSTEM|PHP_INI_PERDIR,		NULL)
+ 
+ 	STD_PHP_INI_BOOLEAN("allow_url_fopen",		"1",		PHP_INI_SYSTEM,		OnUpdateBool,		allow_url_fopen,		php_core_globals,		core_globals)
+ 	STD_PHP_INI_BOOLEAN("allow_url_include",	"0",		PHP_INI_SYSTEM,		OnUpdateBool,		allow_url_include,		php_core_globals,		core_globals)
+diff --git a/main/rfc1867.c b/main/rfc1867.c
+index edef19c16d64e21511f111992fc87083bfb77d17..f9b7f82390e30a3d025b1a31d016c49fed18e57f 100644
+--- a/main/rfc1867.c
++++ b/main/rfc1867.c
+@@ -694,6 +694,7 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler) /* {{{ */
+ 	void *event_extra_data = NULL;
+ 	unsigned int llen = 0;
+ 	int upload_cnt = INI_INT("max_file_uploads");
++	int body_parts_cnt = INI_INT("max_multipart_body_parts");
+ 	const zend_encoding *internal_encoding = zend_multibyte_get_internal_encoding();
+ 	php_rfc1867_getword_t getword;
+ 	php_rfc1867_getword_conf_t getword_conf;
+@@ -715,6 +716,11 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler) /* {{{ */
+ 		return;
+ 	}
+ 
++	if (body_parts_cnt < 0) {
++		body_parts_cnt = PG(max_input_vars) + upload_cnt;
++	}
++	int body_parts_limit = body_parts_cnt;
++
+ 	/* Get the boundary */
+ 	boundary = strstr(content_type_dup, "boundary");
+ 	if (!boundary) {
+@@ -799,6 +805,11 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler) /* {{{ */
+ 			char *pair = NULL;
+ 			int end = 0;
+ 
++			if (--body_parts_cnt < 0) {
++				php_error_docref(NULL, E_WARNING, "Multipart body parts limit exceeded %d. To increase the limit change max_multipart_body_parts in php.ini.", body_parts_limit);
++				goto fileupload_done;
++			}
++
+ 			while (isspace(*cd)) {
+ 				++cd;
+ 			}

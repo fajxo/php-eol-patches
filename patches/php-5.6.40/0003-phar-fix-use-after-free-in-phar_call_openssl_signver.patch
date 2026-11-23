@@ -1,0 +1,49 @@
+From 3a25d8658f1b50e521b1982381ca0be9fc9a9539 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Sun, 8 Nov 2026 11:01:48 +0100
+Subject: [PATCH 03/13] phar: fix use-after-free in
+ phar_call_openssl_signverify()
+
+In the IS_BOOL case, retval_ptr was efree()d and then read with
+Z_BVAL_P() to decide success. Read the result first. This path is used
+when phar signs through userland openssl_sign() (PHAR_HAVE_OPENSSL not
+defined), e.g. Phar::setSignatureAlgorithm(Phar::OPENSSL).
+
+Lab (build container, gcc 16): under valgrind, phar/tar/zip
+phar_setsignaturealgo2.phpt go from LEAK ("Invalid read of size 1" right
+after _efree) to PASS; test_signaturealgos PASS on both. phpt
+ext/openssl+ftp+phar against OpenSSL 4.1.0: fail list identical to the
+unfixed build (43 each).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/phar/util.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/ext/phar/util.c b/ext/phar/util.c
+index 06e4e55d..f1eeb2f0 100644
+--- a/ext/phar/util.c
++++ b/ext/phar/util.c
+@@ -1500,9 +1500,12 @@ static int phar_call_openssl_signverify(int is_sign, php_stream *fp, off_t end,
+ 			}
+ 			efree(retval_ptr);
+ 			return FAILURE;
+-		case IS_BOOL:
++		case IS_BOOL: {
++			/* read the result before freeing the zval that holds it */
++			zend_bool ok = Z_BVAL_P(retval_ptr);
++
+ 			efree(retval_ptr);
+-			if (Z_BVAL_P(retval_ptr)) {
++			if (ok) {
+ 				*signature = estrndup(Z_STRVAL_P(zsig), Z_STRLEN_P(zsig));
+ 				*signature_len = Z_STRLEN_P(zsig);
+ 				zval_dtor(zsig);
+@@ -1512,6 +1515,7 @@ static int phar_call_openssl_signverify(int is_sign, php_stream *fp, off_t end,
+ 			zval_dtor(zsig);
+ 			efree(zsig);
+ 			return FAILURE;
++		}
+ 	}
+ }
+ /* }}} */

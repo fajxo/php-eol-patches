@@ -1,0 +1,1265 @@
+diff --git a/Zend/tests/bug52361.phpt b/Zend/tests/bug52361.phpt
+index 74ed8a8d173b3973da663b8002ebf36b569e3c97..5ffe569e4a615a000df6fcf03804c9d3bf2abf80 100644
+--- a/Zend/tests/bug52361.phpt
++++ b/Zend/tests/bug52361.phpt
+@@ -25,9 +25,8 @@ try {
+ --EXPECTF--
+ 1. Exception: aaa in %sbug52361.php:5
+ Stack trace:
+-#0 %sbug52361.php(13): aaa->__destruct()
+-#1 %sbug52361.php(16): bbb()
+-#2 {main}
++#0 %sbug52361.php(16): aaa->__destruct()
++#1 {main}
+ 2. Exception: bbb in %sbug52361.php:13
+ Stack trace:
+ #0 %sbug52361.php(16): bbb()
+diff --git a/Zend/tests/bug76047.phpt b/Zend/tests/bug76047.phpt
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0f743ee3d6868c55565611c27ac40ce15e16e4f
+--- /dev/null
++++ b/Zend/tests/bug76047.phpt
+@@ -0,0 +1,68 @@
++--TEST--
++Bug #76047: Use-after-free when accessing already destructed backtrace arguments
++--FILE--
++<?php
++
++class Vuln {
++    public $a;
++    public function __destruct() {
++        unset($this->a);
++        $backtrace = (new Exception)->getTrace();
++        var_dump($backtrace);
++    }
++}
++
++function test($arg) {
++    $arg = str_shuffle(str_repeat('A', 79));
++    $vuln = new Vuln();
++    $vuln->a = $arg;
++}
++
++function test2($arg) {
++    $$arg = 1; // Trigger symbol table
++    $arg = str_shuffle(str_repeat('A', 79));
++    $vuln = new Vuln();
++    $vuln->a = $arg;
++}
++
++test('x');
++test2('x');
++
++?>
++--EXPECTF--
++array(1) {
++  [0]=>
++  array(6) {
++    ["file"]=>
++    string(%d) "%s"
++    ["line"]=>
++    int(%d)
++    ["function"]=>
++    string(10) "__destruct"
++    ["class"]=>
++    string(4) "Vuln"
++    ["type"]=>
++    string(2) "->"
++    ["args"]=>
++    array(0) {
++    }
++  }
++}
++array(1) {
++  [0]=>
++  array(6) {
++    ["file"]=>
++    string(%d) "%s"
++    ["line"]=>
++    int(%d)
++    ["function"]=>
++    string(10) "__destruct"
++    ["class"]=>
++    string(4) "Vuln"
++    ["type"]=>
++    string(2) "->"
++    ["args"]=>
++    array(0) {
++    }
++  }
++}
+diff --git a/Zend/zend_vm_def.h b/Zend/zend_vm_def.h
+index ed84d17bb8f3ab9f76c147579881be27009da393..ffdaee2cd3454baa5fb6f1ccc125a8ce76f90eaf 100644
+--- a/Zend/zend_vm_def.h
++++ b/Zend/zend_vm_def.h
+@@ -2366,9 +2366,9 @@ ZEND_VM_HELPER(zend_leave_helper, ANY, ANY)
+ 	uint32_t call_info = EX_CALL_INFO();
+ 
+ 	if (EXPECTED((call_info & (ZEND_CALL_CODE|ZEND_CALL_TOP|ZEND_CALL_HAS_SYMBOL_TABLE|ZEND_CALL_FREE_EXTRA_ARGS|ZEND_CALL_ALLOCATED)) == 0)) {
++		EG(current_execute_data) = EX(prev_execute_data);
+ 		i_free_compiled_variables(execute_data);
+ 
+-		EG(current_execute_data) = EX(prev_execute_data);
+ 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+ 			zend_object *object = Z_OBJ(execute_data->This);
+ #if 0
+@@ -2394,12 +2394,12 @@ ZEND_VM_HELPER(zend_leave_helper, ANY, ANY)
+ 		LOAD_NEXT_OPLINE();
+ 		ZEND_VM_LEAVE();
+ 	} else if (EXPECTED((call_info & (ZEND_CALL_CODE|ZEND_CALL_TOP)) == 0)) {
++		EG(current_execute_data) = EX(prev_execute_data);
+ 		i_free_compiled_variables(execute_data);
+ 
+ 		if (UNEXPECTED(call_info & ZEND_CALL_HAS_SYMBOL_TABLE)) {
+ 			zend_clean_and_cache_symbol_table(EX(symbol_table));
+ 		}
+-		EG(current_execute_data) = EX(prev_execute_data);
+ 
+ 		/* Free extra args before releasing the closure,
+ 		 * as that may free the op_array. */
+@@ -2449,6 +2449,7 @@ ZEND_VM_HELPER(zend_leave_helper, ANY, ANY)
+ 		ZEND_VM_LEAVE();
+ 	} else {
+ 		if (EXPECTED((call_info & ZEND_CALL_CODE) == 0)) {
++			EG(current_execute_data) = EX(prev_execute_data);
+ 			i_free_compiled_variables(execute_data);
+ 			if (UNEXPECTED(call_info & (ZEND_CALL_HAS_SYMBOL_TABLE|ZEND_CALL_FREE_EXTRA_ARGS))) {
+ 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_SYMBOL_TABLE)) {
+@@ -2456,7 +2457,6 @@ ZEND_VM_HELPER(zend_leave_helper, ANY, ANY)
+ 				}
+ 				zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+ 			}
+-			EG(current_execute_data) = EX(prev_execute_data);
+ 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+ 				OBJ_RELEASE((zend_object*)EX(func)->op_array.prototype);
+ 			}
+diff --git a/Zend/zend_vm_execute.h b/Zend/zend_vm_execute.h
+index 3f975dec0b6d93aba5d340a7e941ba8078ba8191..30e135d86f34e9ed6590763a6397ebd1496e8868 100644
+--- a/Zend/zend_vm_execute.h
++++ b/Zend/zend_vm_execute.h
+@@ -434,9 +434,9 @@ static ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_leave_helper_SPEC(ZEND_OPCODE_
+ 	uint32_t call_info = EX_CALL_INFO();
+ 
+ 	if (EXPECTED((call_info & (ZEND_CALL_CODE|ZEND_CALL_TOP|ZEND_CALL_HAS_SYMBOL_TABLE|ZEND_CALL_FREE_EXTRA_ARGS|ZEND_CALL_ALLOCATED)) == 0)) {
++		EG(current_execute_data) = EX(prev_execute_data);
+ 		i_free_compiled_variables(execute_data);
+ 
+-		EG(current_execute_data) = EX(prev_execute_data);
+ 		if (UNEXPECTED(call_info & ZEND_CALL_RELEASE_THIS)) {
+ 			zend_object *object = Z_OBJ(execute_data->This);
+ #if 0
+@@ -462,12 +462,12 @@ static ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_leave_helper_SPEC(ZEND_OPCODE_
+ 		LOAD_NEXT_OPLINE();
+ 		ZEND_VM_LEAVE();
+ 	} else if (EXPECTED((call_info & (ZEND_CALL_CODE|ZEND_CALL_TOP)) == 0)) {
++		EG(current_execute_data) = EX(prev_execute_data);
+ 		i_free_compiled_variables(execute_data);
+ 
+ 		if (UNEXPECTED(call_info & ZEND_CALL_HAS_SYMBOL_TABLE)) {
+ 			zend_clean_and_cache_symbol_table(EX(symbol_table));
+ 		}
+-		EG(current_execute_data) = EX(prev_execute_data);
+ 
+ 		/* Free extra args before releasing the closure,
+ 		 * as that may free the op_array. */
+@@ -517,6 +517,7 @@ static ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_leave_helper_SPEC(ZEND_OPCODE_
+ 		ZEND_VM_LEAVE();
+ 	} else {
+ 		if (EXPECTED((call_info & ZEND_CALL_CODE) == 0)) {
++			EG(current_execute_data) = EX(prev_execute_data);
+ 			i_free_compiled_variables(execute_data);
+ 			if (UNEXPECTED(call_info & (ZEND_CALL_HAS_SYMBOL_TABLE|ZEND_CALL_FREE_EXTRA_ARGS))) {
+ 				if (UNEXPECTED(call_info & ZEND_CALL_HAS_SYMBOL_TABLE)) {
+@@ -524,7 +525,6 @@ static ZEND_OPCODE_HANDLER_RET ZEND_FASTCALL zend_leave_helper_SPEC(ZEND_OPCODE_
+ 				}
+ 				zend_vm_stack_free_extra_args_ex(call_info, execute_data);
+ 			}
+-			EG(current_execute_data) = EX(prev_execute_data);
+ 			if (UNEXPECTED(call_info & ZEND_CALL_CLOSURE)) {
+ 				OBJ_RELEASE((zend_object*)EX(func)->op_array.prototype);
+ 			}
+diff --git a/ext/gd/config.m4 b/ext/gd/config.m4
+index 7abbee4389c36e95f5d39642973925572a6e8825..777d8e0560921ca15b7b5f642244619eafa5fd1f 100644
+--- a/ext/gd/config.m4
++++ b/ext/gd/config.m4
+@@ -186,21 +186,36 @@ AC_DEFUN([PHP_GD_XPM],[
+ AC_DEFUN([PHP_GD_FREETYPE2],[
+   if test "$PHP_FREETYPE_DIR" != "no"; then
+ 
+-    for i in $PHP_FREETYPE_DIR /usr/local /usr; do
+-      if test -f "$i/bin/freetype-config"; then
+-        FREETYPE2_DIR=$i
+-        FREETYPE2_CONFIG="$i/bin/freetype-config"
+-        break
++    AC_PATH_PROG(PKG_CONFIG, pkg-config, no)
++    AC_MSG_CHECKING(for freetype2)
++
++    if test -x "$PKG_CONFIG" && $PKG_CONFIG --exists freetype2 ; then
++
++      FREETYPE2_CFLAGS=`$PKG_CONFIG --cflags freetype2`
++      FREETYPE2_LIBS=`$PKG_CONFIG --libs freetype2`
++      FREETYPE2_VERSION=`$PKG_CONFIG --modversion freetype2`
++      FREETYPE2_DIR="found"
++
++      AC_MSG_RESULT(from pkgconfig: version $FREETYPE2_VERSION found)
++    else
++
++      for i in $PHP_FREETYPE_DIR /usr/local /usr; do
++        if test -f "$i/bin/freetype-config"; then
++          FREETYPE2_DIR=$i
++          FREETYPE2_CONFIG="$i/bin/freetype-config"
++          break
++        fi
++      done
++
++      if test -z "$FREETYPE2_DIR"; then
++        AC_MSG_ERROR([freetype-config not found.])
+       fi
+-    done
+ 
+-    if test -z "$FREETYPE2_DIR"; then
+-      AC_MSG_ERROR([freetype-config not found.])
++      FREETYPE2_CFLAGS=`$FREETYPE2_CONFIG --cflags`
++      FREETYPE2_LIBS=`$FREETYPE2_CONFIG --libs`
++      AC_MSG_RESULT(found via freetype-config)
+     fi
+ 
+-    FREETYPE2_CFLAGS=`$FREETYPE2_CONFIG --cflags`
+-    FREETYPE2_LIBS=`$FREETYPE2_CONFIG --libs`
+-
+     PHP_EVAL_INCLINE($FREETYPE2_CFLAGS)
+     PHP_EVAL_LIBLINE($FREETYPE2_LIBS, GD_SHARED_LIBADD)
+     AC_DEFINE(HAVE_LIBFREETYPE,1,[ ])
+diff --git a/ext/intl/breakiterator/breakiterator_class.cpp b/ext/intl/breakiterator/breakiterator_class.cpp
+index cc3865429c1b57724a12dcb0707b408864d49a02..5c3d1e7896d3a06a6b048102c3a3082a7571cde5 100644
+--- a/ext/intl/breakiterator/breakiterator_class.cpp
++++ b/ext/intl/breakiterator/breakiterator_class.cpp
+@@ -38,6 +38,7 @@ extern "C" {
+ }
+ 
+ using PHP::CodePointBreakIterator;
++using icu::RuleBasedBreakIterator;
+ 
+ /* {{{ Global variables */
+ zend_class_entry *BreakIterator_ce_ptr;
+diff --git a/ext/intl/breakiterator/breakiterator_class.h b/ext/intl/breakiterator/breakiterator_class.h
+index d1b5ebb2c8a9e33ff5e383f8a9f5c09c0c4b8e34..a856b7c7e0724b10f79d783a17a568af2d9b1105 100644
+--- a/ext/intl/breakiterator/breakiterator_class.h
++++ b/ext/intl/breakiterator/breakiterator_class.h
+@@ -26,6 +26,8 @@
+ 
+ #ifndef USE_BREAKITERATOR_POINTER
+ typedef void BreakIterator;
++#else
++using icu::BreakIterator;
+ #endif
+ 
+ typedef struct {
+diff --git a/ext/intl/breakiterator/breakiterator_methods.cpp b/ext/intl/breakiterator/breakiterator_methods.cpp
+index 399bafef9f9128a3e50cf7bdd1c295e4eb2e0d99..f5146a45ac7e7c20c6d3ffca83b6b89c0328080e 100644
+--- a/ext/intl/breakiterator/breakiterator_methods.cpp
++++ b/ext/intl/breakiterator/breakiterator_methods.cpp
+@@ -32,6 +32,8 @@ extern "C" {
+ }
+ 
+ using PHP::CodePointBreakIterator;
++using icu::BreakIterator;
++using icu::Locale;
+ 
+ U_CFUNC PHP_METHOD(BreakIterator, __construct)
+ {
+diff --git a/ext/intl/breakiterator/codepointiterator_internal.cpp b/ext/intl/breakiterator/codepointiterator_internal.cpp
+index 723cfd50220ce6aa4062665de1681def01c63822..5024e7e5a631b3205ac3c4a262f834da7c174056 100644
+--- a/ext/intl/breakiterator/codepointiterator_internal.cpp
++++ b/ext/intl/breakiterator/codepointiterator_internal.cpp
+@@ -33,6 +33,8 @@ typedef union {
+ 
+ using namespace PHP;
+ 
++using icu::UCharCharacterIterator;
++
+ UOBJECT_DEFINE_RTTI_IMPLEMENTATION(CodePointBreakIterator);
+ 
+ CodePointBreakIterator::CodePointBreakIterator()
+@@ -74,7 +76,11 @@ CodePointBreakIterator::~CodePointBreakIterator()
+ 	clearCurrentCharIter();
+ }
+ 
++#if U_ICU_VERSION_MAJOR_NUM >= 70
++bool CodePointBreakIterator::operator==(const BreakIterator& that) const
++#else
+ UBool CodePointBreakIterator::operator==(const BreakIterator& that) const
++#endif
+ {
+ 	if (typeid(*this) != typeid(that)) {
+ 		return FALSE;
+diff --git a/ext/intl/breakiterator/codepointiterator_internal.h b/ext/intl/breakiterator/codepointiterator_internal.h
+index d34fc0a2c216488761642219d101aa233c2b12d3..0baf607782d0d75c7688b5e253d0c17ea117526d 100644
+--- a/ext/intl/breakiterator/codepointiterator_internal.h
++++ b/ext/intl/breakiterator/codepointiterator_internal.h
+@@ -18,8 +18,11 @@
+ #define CODEPOINTITERATOR_INTERNAL_H
+ 
+ #include <unicode/brkiter.h>
++#include <unicode/unistr.h>
+ 
+-using U_ICU_NAMESPACE::BreakIterator;
++using icu::BreakIterator;
++using icu::CharacterIterator;
++using icu::UnicodeString;
+ 
+ namespace PHP {
+ 
+@@ -36,7 +39,11 @@ namespace PHP {
+ 
+ 		virtual ~CodePointBreakIterator();
+ 
++#if U_ICU_VERSION_MAJOR_NUM >= 70
++		virtual bool operator==(const BreakIterator& that) const;
++#else
+ 		virtual UBool operator==(const BreakIterator& that) const;
++#endif
+ 
+ 		virtual CodePointBreakIterator* clone(void) const;
+ 
+diff --git a/ext/intl/breakiterator/rulebasedbreakiterator_methods.cpp b/ext/intl/breakiterator/rulebasedbreakiterator_methods.cpp
+index fbc3fe6f5cdcdf3f0f2098f073cb2b4465626972..954efb8e0a3680b9982485fdc498902423ff2870 100644
+--- a/ext/intl/breakiterator/rulebasedbreakiterator_methods.cpp
++++ b/ext/intl/breakiterator/rulebasedbreakiterator_methods.cpp
+@@ -26,6 +26,9 @@ extern "C" {
+ #include "../intl_convertcpp.h"
+ #include "../intl_common.h"
+ 
++using icu::RuleBasedBreakIterator;
++using icu::Locale;
++
+ static inline RuleBasedBreakIterator *fetch_rbbi(BreakIterator_object *bio) {
+ 	return (RuleBasedBreakIterator*)bio->biter;
+ }
+diff --git a/ext/intl/calendar/calendar_class.cpp b/ext/intl/calendar/calendar_class.cpp
+index e9c817af03b05e6d314299fe4085d1ec84232869..a54b3f966a894924dcb09254544cdae88b06b6a6 100644
+--- a/ext/intl/calendar/calendar_class.cpp
++++ b/ext/intl/calendar/calendar_class.cpp
+@@ -34,6 +34,9 @@ extern "C" {
+ #include <assert.h>
+ }
+ 
++using icu::GregorianCalendar;
++using icu::Locale;
++
+ /* {{{ Global variables */
+ zend_class_entry *Calendar_ce_ptr;
+ zend_class_entry *GregorianCalendar_ce_ptr;
+diff --git a/ext/intl/calendar/calendar_class.h b/ext/intl/calendar/calendar_class.h
+index a884580a9ab4d0c1d3b70e4f9c7a05aecd570895..33cd7bc8e39fde7f7c420a856d2cf5125609f844 100644
+--- a/ext/intl/calendar/calendar_class.h
++++ b/ext/intl/calendar/calendar_class.h
+@@ -26,6 +26,8 @@
+ 
+ #ifndef USE_CALENDAR_POINTER
+ typedef void Calendar;
++#else
++using icu::Calendar;
+ #endif
+ 
+ typedef struct {
+diff --git a/ext/intl/calendar/calendar_methods.cpp b/ext/intl/calendar/calendar_methods.cpp
+index 590917d2722aa15873dc57f9555a8b8a5550c4b7..d08574dafe99f7258355c8b0e2cc391a30875540 100644
+--- a/ext/intl/calendar/calendar_methods.cpp
++++ b/ext/intl/calendar/calendar_methods.cpp
+@@ -40,6 +40,8 @@ extern "C" {
+ }
+ #include "../common/common_enum.h"
+ 
++using icu::Locale;
++
+ U_CFUNC PHP_METHOD(IntlCalendar, __construct)
+ {
+ 	zend_throw_exception( NULL,
+diff --git a/ext/intl/calendar/gregoriancalendar_methods.cpp b/ext/intl/calendar/gregoriancalendar_methods.cpp
+index ab8ab767965b6ea4e4427a51f5e4d58eaa466446..48745818b5f37df8305c8e11f5fde52e37d6f4ac 100644
+--- a/ext/intl/calendar/gregoriancalendar_methods.cpp
++++ b/ext/intl/calendar/gregoriancalendar_methods.cpp
+@@ -23,6 +23,8 @@
+ #include <unicode/locid.h>
+ #include <unicode/calendar.h>
+ #include <unicode/gregocal.h>
++#include <unicode/ustring.h>
++
+ extern "C" {
+ #include "../php_intl.h"
+ #include "../intl_common.h"
+@@ -34,6 +36,11 @@ extern "C" {
+ #include "zend_exceptions.h"
+ }
+ 
++using icu::GregorianCalendar;
++using icu::Locale;
++using icu::UnicodeString;
++using icu::StringPiece;
++
+ static inline GregorianCalendar *fetch_greg(Calendar_object *co) {
+ 	return (GregorianCalendar*)co->ucal;
+ }
+diff --git a/ext/intl/common/common_date.cpp b/ext/intl/common/common_date.cpp
+index 4da00b0221fb28c9e554272ed65053b6df7984f4..47834e9488b96f0c314ef13f3ab7c776c36e723b 100644
+--- a/ext/intl/common/common_date.cpp
++++ b/ext/intl/common/common_date.cpp
+@@ -27,6 +27,9 @@ extern "C" {
+ 
+ #include "zend_portability.h"
+ 
++using icu::TimeZone;
++using icu::UnicodeString;
++
+ /* {{{ timezone_convert_datetimezone
+  *      The timezone in DateTime and DateTimeZone is not unified. */
+ U_CFUNC TimeZone *timezone_convert_datetimezone(int type,
+diff --git a/ext/intl/common/common_date.h b/ext/intl/common/common_date.h
+index 6d15145516c9928a97e0dfc5c0dc2a00d58a379c..acb8e68e9ab514044244546e3e3cbae7eacb53dc 100644
+--- a/ext/intl/common/common_date.h
++++ b/ext/intl/common/common_date.h
+@@ -28,6 +28,8 @@ U_CDECL_END
+ 
+ #include <unicode/timezone.h>
+ 
++using icu::TimeZone;
++
+ U_CFUNC TimeZone *timezone_convert_datetimezone(int type, void *object, int is_datetime, intl_error *outside_error, const char *func);
+ U_CFUNC int intl_datetime_decompose(zval *z, double *millis, TimeZone **tz,
+ 		intl_error *err, const char *func);
+diff --git a/ext/intl/common/common_enum.h b/ext/intl/common/common_enum.h
+index b9b87c17e02292b587a6e006e85a4f32f7b4df45..9e47115304172069a22af764b2d0532940ebe821 100644
+--- a/ext/intl/common/common_enum.h
++++ b/ext/intl/common/common_enum.h
+@@ -75,6 +75,7 @@ U_CFUNC zval *zoi_with_current_get_current_data(zend_object_iterator *iter);
+ U_CFUNC void zoi_with_current_invalidate_current(zend_object_iterator *iter);
+ 
+ #ifdef __cplusplus
++using icu::StringEnumeration;
+ U_CFUNC void IntlIterator_from_StringEnumeration(StringEnumeration *se, zval *object);
+ #endif
+ 
+diff --git a/ext/intl/converter/converter.c b/ext/intl/converter/converter.c
+index b893b8fd0ae02746f14e498cbd02b81ae6f498f1..d1c3b319f38ae817a1334bad2b8b5eb5b552f895 100644
+--- a/ext/intl/converter/converter.c
++++ b/ext/intl/converter/converter.c
+@@ -18,6 +18,8 @@
+ #include "zend_exceptions.h"
+ 
+ #include <unicode/utypes.h>
++#include <unicode/utf8.h>
++#include <unicode/utf16.h>
+ #include <unicode/ucnv.h>
+ #include <unicode/ustring.h>
+ 
+diff --git a/ext/intl/dateformat/dateformat_format_object.cpp b/ext/intl/dateformat/dateformat_format_object.cpp
+index fa6dc76255da67c5eae45447d917f27a1d930fff..c2429fb592c9dc4f2862105e6f655ab052c24d59 100644
+--- a/ext/intl/dateformat/dateformat_format_object.cpp
++++ b/ext/intl/dateformat/dateformat_format_object.cpp
+@@ -33,6 +33,12 @@ extern "C" {
+ #include "../common/common_date.h"
+ }
+ 
++using icu::Locale;
++using icu::DateFormat;
++using icu::GregorianCalendar;
++using icu::StringPiece;
++using icu::SimpleDateFormat;
++
+ static const DateFormat::EStyle valid_styles[] = {
+ 		DateFormat::kNone,
+ 		DateFormat::kFull,
+diff --git a/ext/intl/dateformat/dateformat_helpers.cpp b/ext/intl/dateformat/dateformat_helpers.cpp
+index 959afa8d821975ca1eb50f669b2ac81adea2827a..7e070ea464ad7fce4527576387bc9855b59d7bd1 100644
+--- a/ext/intl/dateformat/dateformat_helpers.cpp
++++ b/ext/intl/dateformat/dateformat_helpers.cpp
+@@ -28,6 +28,8 @@ extern "C" {
+ #include "../calendar/calendar_class.h"
+ }
+ 
++using icu::GregorianCalendar;
++
+ int datefmt_process_calendar_arg(zval* calendar_zv,
+ 								 Locale const& locale,
+ 								 const char *func_name,
+diff --git a/ext/intl/dateformat/dateformat_helpers.h b/ext/intl/dateformat/dateformat_helpers.h
+index a2a146b7d7e90e6cccd7a642cff112d0014b94c8..7489effc180a5de7482ee5b7810df29a0340b7aa 100644
+--- a/ext/intl/dateformat/dateformat_helpers.h
++++ b/ext/intl/dateformat/dateformat_helpers.h
+@@ -22,11 +22,16 @@
+ #endif
+ 
+ #include <unicode/calendar.h>
++#include <unicode/datefmt.h>
+ 
+ extern "C" {
+ #include "../php_intl.h"
+ }
+ 
++using icu::Locale;
++using icu::Calendar;
++using icu::DateFormat;
++
+ int datefmt_process_calendar_arg(zval* calendar_zv,
+ 								 Locale const& locale,
+ 								 const char *func_name,
+diff --git a/ext/intl/grapheme/grapheme_string.c b/ext/intl/grapheme/grapheme_string.c
+index 028c7907c12719371742ada1defc5140adf84582..0ec718b1e97803d6765b1a5c728253d6eb81663e 100644
+--- a/ext/intl/grapheme/grapheme_string.c
++++ b/ext/intl/grapheme/grapheme_string.c
+@@ -24,6 +24,7 @@
+ #include "grapheme_util.h"
+ 
+ #include <unicode/utypes.h>
++#include <unicode/utf8.h>
+ #include <unicode/ucol.h>
+ #include <unicode/ustring.h>
+ #include <unicode/ubrk.h>
+@@ -834,10 +835,10 @@ PHP_FUNCTION(grapheme_extract)
+ 	pstr = str + start;
+ 
+ 	/* just in case pstr points in the middle of a character, move forward to the start of the next char */
+-	if ( !UTF8_IS_SINGLE(*pstr) && !U8_IS_LEAD(*pstr) ) {
+-		char *str_end = str + str_len;
++	if ( !U8_IS_SINGLE(*pstr) && !U8_IS_LEAD(*pstr) ) {
++		unsigned char *str_end = str + str_len;
+ 
+-		while ( !UTF8_IS_SINGLE(*pstr) && !U8_IS_LEAD(*pstr) ) {
++		while ( !U8_IS_SINGLE(*pstr) && !U8_IS_LEAD(*pstr) ) {
+ 			pstr++;
+ 			if ( pstr >= str_end ) {
+ 				intl_error_set( NULL, U_ILLEGAL_ARGUMENT_ERROR,
+diff --git a/ext/intl/intl_convertcpp.h b/ext/intl/intl_convertcpp.h
+index eab5f149c88264b735ceafdf637d70424bc5b55b..0bb486f7b658c6bac77e3061a6406af57f38b625 100644
+--- a/ext/intl/intl_convertcpp.h
++++ b/ext/intl/intl_convertcpp.h
+@@ -26,6 +26,8 @@
+ #include <unicode/unistr.h>
+ #include <zend_types.h>
+ 
++using icu::UnicodeString;
++
+ int intl_stringFromChar(UnicodeString &ret, char *str, size_t str_len, UErrorCode *status);
+ 
+ zend_string* intl_charFromString(const UnicodeString &from, UErrorCode *status);
+diff --git a/ext/intl/locale/locale_methods.c b/ext/intl/locale/locale_methods.c
+index 3379916822c031a8fef999a5c0e5706cf0c3105f..d0f44f5be2bd6f3e6706da3786545d04fc0f3986 100644
+--- a/ext/intl/locale/locale_methods.c
++++ b/ext/intl/locale/locale_methods.c
+@@ -1333,7 +1333,7 @@ PHP_FUNCTION(locale_filter_matches)
+ 		if( token && (token==cur_lang_tag) ){
+ 			/* check if the char. after match is SEPARATOR */
+ 			chrcheck = token + (strlen(cur_loc_range));
+-			if( isIDSeparator(*chrcheck) || isEndOfTag(*chrcheck) ){
++			if( isIDSeparator(*chrcheck) || isKeywordSeparator(*chrcheck) || isEndOfTag(*chrcheck) ){
+ 				if( cur_lang_tag){
+ 					efree( cur_lang_tag );
+ 				}
+diff --git a/ext/intl/msgformat/msgformat_helpers.cpp b/ext/intl/msgformat/msgformat_helpers.cpp
+index 3e9b0d7f52e38f074509656d57936011c1b0eecd..027f7d9c66ef1da315ea98e5a1f111cdfd4b126d 100644
+--- a/ext/intl/msgformat/msgformat_helpers.cpp
++++ b/ext/intl/msgformat/msgformat_helpers.cpp
+@@ -78,6 +78,16 @@ MessageFormatAdapter::getMessagePattern(MessageFormat* m) {
+ #endif
+ U_NAMESPACE_END
+ 
++using icu::Formattable;
++using icu::Format;
++using icu::DateFormat;
++using icu::MessageFormat;
++#ifdef HAS_MESSAGE_PATTERN
++using icu::MessagePattern;
++#endif
++using icu::MessageFormatAdapter;
++using icu::FieldPosition;
++
+ U_CFUNC int32_t umsg_format_arg_count(UMessageFormat *fmt)
+ {
+ 	int32_t fmt_count = 0;
+@@ -229,15 +239,16 @@ static HashTable *umsg_parse_format(MessageFormatter_object *mfo,
+ 					UnicodeString typeString = mp.getSubstring(type_part);
+ 					/* This is all based on the rules in the docs for MessageFormat
+ 					 * @see http://icu-project.org/apiref/icu4c/classMessageFormat.html */
+-					if (typeString == "number") {
++#define ASCII_LITERAL(s) UNICODE_STRING(s, sizeof(s)-1)
++					if (typeString == ASCII_LITERAL("number")) {
+ 						MessagePattern::Part style_part = mp.getPart(i + 1); /* Not advancing i */
+ 						if (style_part.getType() == UMSGPAT_PART_TYPE_ARG_STYLE) {
+ 							UnicodeString styleString = mp.getSubstring(style_part);
+-							if (styleString == "integer") {
++							if (styleString == ASCII_LITERAL("integer")) {
+ 								type = Formattable::kInt64;
+-							} else if (styleString == "currency") {
++							} else if (styleString == ASCII_LITERAL("currency")) {
+ 								type = Formattable::kDouble;
+-							} else if (styleString == "percent") {
++							} else if (styleString == ASCII_LITERAL("percent")) {
+ 								type = Formattable::kDouble;
+ 							} else { /* some style invalid/unknown to us */
+ 								type = Formattable::kDouble;
+@@ -245,12 +256,13 @@ static HashTable *umsg_parse_format(MessageFormatter_object *mfo,
+ 						} else { // if missing style, part, make it a double
+ 							type = Formattable::kDouble;
+ 						}
+-					} else if ((typeString == "date") || (typeString == "time")) {
++					} else if ((typeString == ASCII_LITERAL("date")) || (typeString == ASCII_LITERAL("time"))) {
+ 						type = Formattable::kDate;
+-					} else if ((typeString == "spellout") || (typeString == "ordinal")
+-							|| (typeString == "duration")) {
++					} else if ((typeString == ASCII_LITERAL("spellout")) || (typeString == ASCII_LITERAL("ordinal"))
++							|| (typeString == ASCII_LITERAL("duration"))) {
+ 						type = Formattable::kDouble;
+ 					}
++#undef ASCII_LITERAL
+ 				} else {
+ 					/* If there's no UMSGPAT_PART_TYPE_ARG_TYPE right after a
+ 					 * UMSGPAT_ARG_TYPE_SIMPLE argument, then the pattern
+diff --git a/ext/intl/normalizer/normalizer_normalize.c b/ext/intl/normalizer/normalizer_normalize.c
+index 52780acdbcad678340b3f15342397be3ec42cc3c..78d98d1527fb199d55089ab6a3c97e241183bec4 100644
+--- a/ext/intl/normalizer/normalizer_normalize.c
++++ b/ext/intl/normalizer/normalizer_normalize.c
+@@ -24,6 +24,7 @@
+ #include "normalizer_class.h"
+ #include "normalizer_normalize.h"
+ #include "intl_convert.h"
++#include <unicode/utf8.h>
+ 
+ /* {{{ proto string Normalizer::normalize( string $input [, string $form = FORM_C] )
+  * Normalize a string. }}} */
+diff --git a/ext/intl/timezone/timezone_class.cpp b/ext/intl/timezone/timezone_class.cpp
+index b036de81cf98641e65e7ba0c44a8f96fd65133b3..50dab66b5accf3f899854af00c40f380412e6a86 100644
+--- a/ext/intl/timezone/timezone_class.cpp
++++ b/ext/intl/timezone/timezone_class.cpp
+@@ -37,6 +37,8 @@ extern "C" {
+ #include <ext/date/php_date.h>
+ }
+ 
++using icu::Calendar;
++
+ /* {{{ Global variables */
+ U_CDECL_BEGIN
+ zend_class_entry *TimeZone_ce_ptr = NULL;
+diff --git a/ext/intl/timezone/timezone_class.h b/ext/intl/timezone/timezone_class.h
+index 0667c78994bfd57ab758cd10ceb7e8a5522b88d1..99e9b56dae044af5beefd4ced22a107a1aaf7cfe 100644
+--- a/ext/intl/timezone/timezone_class.h
++++ b/ext/intl/timezone/timezone_class.h
+@@ -29,6 +29,8 @@
+ 
+ #ifndef USE_TIMEZONE_POINTER
+ typedef void TimeZone;
++#else
++using icu::TimeZone;
+ #endif
+ 
+ typedef struct {
+diff --git a/ext/intl/timezone/timezone_methods.cpp b/ext/intl/timezone/timezone_methods.cpp
+index 20c0e0248075b6ce24b0b74a8f1c49b9ccb88d25..39cdf6741a2c01e5efcff0c53228994bd3cb340f 100644
+--- a/ext/intl/timezone/timezone_methods.cpp
++++ b/ext/intl/timezone/timezone_methods.cpp
+@@ -23,6 +23,7 @@
+ #include <unicode/locid.h>
+ #include <unicode/timezone.h>
+ #include <unicode/ustring.h>
++#include <unicode/calendar.h>
+ #include "intl_convertcpp.h"
+ 
+ #include "../common/common_date.h"
+@@ -37,6 +38,9 @@ extern "C" {
+ }
+ #include "common/common_enum.h"
+ 
++using icu::Locale;
++using icu::Calendar;
++
+ U_CFUNC PHP_METHOD(IntlTimeZone, __construct)
+ {
+ 	zend_throw_exception( NULL,
+diff --git a/ext/intl/uchar/uchar.c b/ext/intl/uchar/uchar.c
+index d9f257dd6819fa6aecce29c64e03469d4d0113e7..69d1bee53df2f3dba292cb85d92a70ef0ba47b54 100644
+--- a/ext/intl/uchar/uchar.c
++++ b/ext/intl/uchar/uchar.c
+@@ -3,6 +3,7 @@
+ #include "intl_convert.h"
+ 
+ #include <unicode/uchar.h>
++#include <unicode/utf8.h>
+ 
+ #define IC_METHOD(mname) PHP_METHOD(IntlChar, mname)
+ 
+diff --git a/ext/libxml/libxml.c b/ext/libxml/libxml.c
+index c871cb89bda098a15561a5eb7de17b328ff6f39a..679b195e30e7334a163cb46c21f2c88aebc5f004 100644
+--- a/ext/libxml/libxml.c
++++ b/ext/libxml/libxml.c
+@@ -428,7 +428,7 @@ php_libxml_input_buffer_create_filename(const char *URI, xmlCharEncoding enc)
+ static xmlOutputBufferPtr
+ php_libxml_output_buffer_create_filename(const char *URI,
+                               xmlCharEncodingHandlerPtr encoder,
+-                              int compression ATTRIBUTE_UNUSED)
++                              int compression)
+ {
+ 	xmlOutputBufferPtr ret;
+ 	xmlURIPtr puri;
+diff --git a/ext/openssl/openssl.c b/ext/openssl/openssl.c
+index 3eea08c649016b55ae41e072167e5a9f5afa6337..21c59ade88ade2cb44ab9e3ef528c7e4fd9a3ffa 100644
+--- a/ext/openssl/openssl.c
++++ b/ext/openssl/openssl.c
+@@ -1482,7 +1482,6 @@ PHP_MINIT_FUNCTION(openssl)
+ 	REGISTER_LONG_CONSTANT("PKCS7_NOSIGS", PKCS7_NOSIGS, CONST_CS|CONST_PERSISTENT);
+ 
+ 	REGISTER_LONG_CONSTANT("OPENSSL_PKCS1_PADDING", RSA_PKCS1_PADDING, CONST_CS|CONST_PERSISTENT);
+-	REGISTER_LONG_CONSTANT("OPENSSL_SSLV23_PADDING", RSA_SSLV23_PADDING, CONST_CS|CONST_PERSISTENT);
+ 	REGISTER_LONG_CONSTANT("OPENSSL_NO_PADDING", RSA_NO_PADDING, CONST_CS|CONST_PERSISTENT);
+ 	REGISTER_LONG_CONSTANT("OPENSSL_PKCS1_OAEP_PADDING", RSA_PKCS1_OAEP_PADDING, CONST_CS|CONST_PERSISTENT);
+ 
+diff --git a/ext/standard/tests/strings/url_t.phpt b/ext/standard/tests/strings/url_t.phpt
+index 79ff3bc4a8e3df2ba8307627aeed3143d5ff21c3..f564f59f0632226b386265eaa250b83fef730a53 100644
+--- a/ext/standard/tests/strings/url_t.phpt
++++ b/ext/standard/tests/strings/url_t.phpt
+@@ -575,15 +575,13 @@ $sample_urls = array (
+   string(16) "some_page_ref123"
+ }
+ 
+---> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(7) {
++--> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(6) {
+   ["scheme"]=>
+   string(4) "http"
+   ["host"]=>
+-  string(11) "www.php.net"
++  string(26) "secret@hideout@www.php.net"
+   ["port"]=>
+   int(80)
+-  ["user"]=>
+-  string(14) "secret@hideout"
+   ["path"]=>
+   string(10) "/index.php"
+   ["query"]=>
+diff --git a/ext/standard/tests/url/bug77423.phpt b/ext/standard/tests/url/bug77423.phpt
+new file mode 100644
+index 0000000000000000000000000000000000000000..be03fe95e24e2015c19d60138a24c8d35289fe5d
+--- /dev/null
++++ b/ext/standard/tests/url/bug77423.phpt
+@@ -0,0 +1,30 @@
++--TEST--
++Bug #77423 (parse_url() will deliver a wrong host to user)
++--FILE--
++<?php
++$urls = array(
++    "http://php.net\@aliyun.com/aaa.do",
++    "https://example.com\uFF03@bing.com",
++);
++foreach ($urls as $url) {
++    var_dump(filter_var($url, FILTER_VALIDATE_URL));
++    var_dump(parse_url($url));
++}
++?>
++--EXPECT--
++bool(false)
++array(3) {
++  ["scheme"]=>
++  string(4) "http"
++  ["host"]=>
++  string(19) "php.net\@aliyun.com"
++  ["path"]=>
++  string(7) "/aaa.do"
++}
++bool(false)
++array(2) {
++  ["scheme"]=>
++  string(5) "https"
++  ["host"]=>
++  string(26) "example.com\uFF03@bing.com"
++}
+diff --git a/ext/standard/tests/url/parse_url_basic_001.phpt b/ext/standard/tests/url/parse_url_basic_001.phpt
+index 4606849c57817fd33c44077f7093c488b9240e07..51010991326cdd68e281e6bd5c4645b11dd12a58 100644
+--- a/ext/standard/tests/url/parse_url_basic_001.phpt
++++ b/ext/standard/tests/url/parse_url_basic_001.phpt
+@@ -506,15 +506,13 @@ echo "Done";
+   string(16) "some_page_ref123"
+ }
+ 
+---> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(7) {
++--> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(6) {
+   ["scheme"]=>
+   string(4) "http"
+   ["host"]=>
+-  string(11) "www.php.net"
++  string(26) "secret@hideout@www.php.net"
+   ["port"]=>
+   int(80)
+-  ["user"]=>
+-  string(14) "secret@hideout"
+   ["path"]=>
+   string(10) "/index.php"
+   ["query"]=>
+diff --git a/ext/standard/tests/url/parse_url_basic_003.phpt b/ext/standard/tests/url/parse_url_basic_003.phpt
+index 3d5a4a344afdaebe9c37990a1e3a4fe938d239ba..7968fd3f09fdabb6e8f321d921e57b83d2f06a93 100644
+--- a/ext/standard/tests/url/parse_url_basic_003.phpt
++++ b/ext/standard/tests/url/parse_url_basic_003.phpt
+@@ -68,7 +68,7 @@ echo "Done";
+ --> http://secret:@www.php.net/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(11) "www.php.net"
+ --> http://:hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(11) "www.php.net"
+ --> http://secret:hideout@www.php.net/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(11) "www.php.net"
+---> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(11) "www.php.net"
++--> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(26) "secret@hideout@www.php.net"
+ --> http://secret:hid:out@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(11) "www.php.net"
+ --> nntp://news.php.net   : string(12) "news.php.net"
+ --> ftp://ftp.gnu.org/gnu/glic/glibc.tar.gz   : string(11) "ftp.gnu.org"
+diff --git a/ext/standard/tests/url/parse_url_basic_005.phpt b/ext/standard/tests/url/parse_url_basic_005.phpt
+index aefb33964bc425c674091e8f0a09bd80b3a20fac..ba778bf9035db920f8a1ef578fff77e256237d74 100644
+--- a/ext/standard/tests/url/parse_url_basic_005.phpt
++++ b/ext/standard/tests/url/parse_url_basic_005.phpt
+@@ -68,7 +68,7 @@ echo "Done";
+ --> http://secret:@www.php.net/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(6) "secret"
+ --> http://:hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(0) ""
+ --> http://secret:hideout@www.php.net/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(6) "secret"
+---> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(14) "secret@hideout"
++--> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : NULL
+ --> http://secret:hid:out@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123   : string(6) "secret"
+ --> nntp://news.php.net   : NULL
+ --> ftp://ftp.gnu.org/gnu/glic/glibc.tar.gz   : NULL
+diff --git a/ext/standard/tests/url/parse_url_unterminated.phpt b/ext/standard/tests/url/parse_url_unterminated.phpt
+index 912b6a5641e82cdb564b622a31c0cd2e9ef95a24..875d93a109483d624c0294cd6e20502b7265b8ec 100644
+--- a/ext/standard/tests/url/parse_url_unterminated.phpt
++++ b/ext/standard/tests/url/parse_url_unterminated.phpt
+@@ -508,15 +508,13 @@ echo "Done";
+   string(16) "some_page_ref123"
+ }
+ 
+---> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(7) {
++--> http://secret@hideout@www.php.net:80/index.php?test=1&test2=char&test3=mixesCI#some_page_ref123: array(6) {
+   ["scheme"]=>
+   string(4) "http"
+   ["host"]=>
+-  string(11) "www.php.net"
++  string(26) "secret@hideout@www.php.net"
+   ["port"]=>
+   int(80)
+-  ["user"]=>
+-  string(14) "secret@hideout"
+   ["path"]=>
+   string(10) "/index.php"
+   ["query"]=>
+diff --git a/ext/standard/url.c b/ext/standard/url.c
+index 1dd073e2bb423652821f351135b9582d76e175d5..8d155bb9846c97701dee5ac54c7e0bbcc6c84366 100644
+--- a/ext/standard/url.c
++++ b/ext/standard/url.c
+@@ -92,6 +92,22 @@ PHPAPI php_url *php_url_parse(char const *str)
+ 	return php_url_parse_ex(str, strlen(str));
+ }
+ 
++static int is_userinfo_valid(const char *str, size_t len)
++{
++	char *valid = "-._~!$&'()*+,;=:";
++	char *p = str;
++	while (p - str < len) {
++		if (isalpha(*p) || isdigit(*p) || strchr(valid, *p)) {
++			p++;
++		} else if (*p == '%' && p - str <= len - 3 && isdigit(*(p+1)) && isxdigit(*(p+2))) {
++			p += 3;
++		} else {
++			return 0;
++		}
++	}
++	return 1;
++}
++
+ /* {{{ php_url_parse
+  */
+ PHPAPI php_url *php_url_parse_ex(char const *str, size_t length)
+@@ -235,13 +251,18 @@ PHPAPI php_url *php_url_parse_ex(char const *str, size_t length)
+ 			ret->pass = estrndup(pp, (p-pp));
+ 			php_replace_controlchars_ex(ret->pass, (p-pp));
+ 		} else {
++			if (!is_userinfo_valid(s, p-s)) {
++				goto check_port;
++			}
+ 			ret->user = estrndup(s, (p-s));
+ 			php_replace_controlchars_ex(ret->user, (p-s));
++
+ 		}
+ 
+ 		s = p + 1;
+ 	}
+ 
++check_port:
+ 	/* check for port */
+ 	if (s < ue && *s == '[' && *(e-1) == ']') {
+ 		/* Short circuit portscan,
+diff --git a/sapi/fpm/fpm/fpm_children.c b/sapi/fpm/fpm/fpm_children.c
+index eed0c6757a750c24a0adaf246f2f0599aa25933a..05513f0084b9de928059bf31c5719e4da2ab8e88 100644
+--- a/sapi/fpm/fpm/fpm_children.c
++++ b/sapi/fpm/fpm/fpm_children.c
+@@ -243,7 +243,7 @@ void fpm_children_bury() /* {{{ */
+ 
+ 			fpm_child_unlink(child);
+ 
+-			fpm_scoreboard_proc_free(wp->scoreboard, child->scoreboard_i);
++			fpm_scoreboard_proc_free(child);
+ 
+ 			fpm_clock_get(&tv1);
+ 
+@@ -253,9 +253,9 @@ void fpm_children_bury() /* {{{ */
+ 				if (!fpm_pctl_can_spawn_children()) {
+ 					severity = ZLOG_DEBUG;
+ 				}
+-				zlog(severity, "[pool %s] child %d exited %s after %ld.%06d seconds from start", child->wp->config->name, (int) pid, buf, tv2.tv_sec, (int) tv2.tv_usec);
++				zlog(severity, "[pool %s] child %d exited %s after %ld.%06d seconds from start", wp->config->name, (int) pid, buf, tv2.tv_sec, (int) tv2.tv_usec);
+ 			} else {
+-				zlog(ZLOG_DEBUG, "[pool %s] child %d has been killed by the process management after %ld.%06d seconds from start", child->wp->config->name, (int) pid, tv2.tv_sec, (int) tv2.tv_usec);
++				zlog(ZLOG_DEBUG, "[pool %s] child %d has been killed by the process management after %ld.%06d seconds from start", wp->config->name, (int) pid, tv2.tv_sec, (int) tv2.tv_usec);
+ 			}
+ 
+ 			fpm_child_close(child, 1 /* in event_loop */);
+@@ -321,7 +321,7 @@ static struct fpm_child_s *fpm_resources_prepare(struct fpm_worker_pool_s *wp) /
+ 		return 0;
+ 	}
+ 
+-	if (0 > fpm_scoreboard_proc_alloc(wp->scoreboard, &c->scoreboard_i)) {
++	if (0 > fpm_scoreboard_proc_alloc(c)) {
+ 		fpm_stdio_discard_pipes(c);
+ 		fpm_child_free(c);
+ 		return 0;
+@@ -333,7 +333,7 @@ static struct fpm_child_s *fpm_resources_prepare(struct fpm_worker_pool_s *wp) /
+ 
+ static void fpm_resources_discard(struct fpm_child_s *child) /* {{{ */
+ {
+-	fpm_scoreboard_proc_free(child->wp->scoreboard, child->scoreboard_i);
++	fpm_scoreboard_proc_free(child);
+ 	fpm_stdio_discard_pipes(child);
+ 	fpm_child_free(child);
+ }
+@@ -346,10 +346,10 @@ static void fpm_child_resources_use(struct fpm_child_s *child) /* {{{ */
+ 		if (wp == child->wp) {
+ 			continue;
+ 		}
+-		fpm_scoreboard_free(wp->scoreboard);
++		fpm_scoreboard_free(wp);
+ 	}
+ 
+-	fpm_scoreboard_child_use(child->wp->scoreboard, child->scoreboard_i, getpid());
++	fpm_scoreboard_child_use(child, getpid());
+ 	fpm_stdio_child_use_pipes(child);
+ 	fpm_child_free(child);
+ }
+diff --git a/sapi/fpm/fpm/fpm_request.c b/sapi/fpm/fpm/fpm_request.c
+index a4ace853104258347dad4878124e9898755de9cd..deaccf432ab6016ef07c2158eb5b6fb2ef852ff6 100644
+--- a/sapi/fpm/fpm/fpm_request.c
++++ b/sapi/fpm/fpm/fpm_request.c
+@@ -286,7 +286,7 @@ int fpm_request_is_idle(struct fpm_child_s *child) /* {{{ */
+ 	struct fpm_scoreboard_proc_s *proc;
+ 
+ 	/* no need in atomicity here */
+-	proc = fpm_scoreboard_proc_get(child->wp->scoreboard, child->scoreboard_i);
++	proc = fpm_scoreboard_proc_get_from_child(child);
+ 	if (!proc) {
+ 		return 0;
+ 	}
+@@ -301,7 +301,7 @@ int fpm_request_last_activity(struct fpm_child_s *child, struct timeval *tv) /*
+ 
+ 	if (!tv) return -1;
+ 
+-	proc = fpm_scoreboard_proc_get(child->wp->scoreboard, child->scoreboard_i);
++	proc = fpm_scoreboard_proc_get_from_child(child);
+ 	if (!proc) {
+ 		return -1;
+ 	}
+diff --git a/sapi/fpm/fpm/fpm_scoreboard.c b/sapi/fpm/fpm/fpm_scoreboard.c
+index 7a65fcbeb715dc324a25333922d96a99356c8666..091efdc574c2b61e00e5ee83c779a09c1adc0f37 100644
+--- a/sapi/fpm/fpm/fpm_scoreboard.c
++++ b/sapi/fpm/fpm/fpm_scoreboard.c
+@@ -7,6 +7,7 @@
+ #include <time.h>
+ 
+ #include "fpm_config.h"
++#include "fpm_children.h"
+ #include "fpm_scoreboard.h"
+ #include "fpm_shm.h"
+ #include "fpm_sockets.h"
+@@ -24,7 +25,6 @@ static float fpm_scoreboard_tick;
+ int fpm_scoreboard_init_main() /* {{{ */
+ {
+ 	struct fpm_worker_pool_s *wp;
+-	unsigned int i;
+ 
+ #ifdef HAVE_TIMES
+ #if (defined(HAVE_SYSCONF) && defined(_SC_CLK_TCK))
+@@ -41,7 +41,7 @@ int fpm_scoreboard_init_main() /* {{{ */
+ 
+ 
+ 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+-		size_t scoreboard_size, scoreboard_nprocs_size;
++		size_t scoreboard_procs_size;
+ 		void *shm_mem;
+ 
+ 		if (wp->config->pm_max_children < 1) {
+@@ -54,22 +54,15 @@ int fpm_scoreboard_init_main() /* {{{ */
+ 			return -1;
+ 		}
+ 
+-		scoreboard_size        = sizeof(struct fpm_scoreboard_s) + (wp->config->pm_max_children) * sizeof(struct fpm_scoreboard_proc_s *);
+-		scoreboard_nprocs_size = sizeof(struct fpm_scoreboard_proc_s) * wp->config->pm_max_children;
+-		shm_mem                = fpm_shm_alloc(scoreboard_size + scoreboard_nprocs_size);
++		scoreboard_procs_size = sizeof(struct fpm_scoreboard_proc_s) * wp->config->pm_max_children;
++		shm_mem = fpm_shm_alloc(sizeof(struct fpm_scoreboard_s) + scoreboard_procs_size);
+ 
+ 		if (!shm_mem) {
+ 			return -1;
+ 		}
+-		wp->scoreboard         = shm_mem;
++		wp->scoreboard = shm_mem;
++		wp->scoreboard->pm = wp->config->pm;
+ 		wp->scoreboard->nprocs = wp->config->pm_max_children;
+-		shm_mem               += scoreboard_size;
+-
+-		for (i = 0; i < wp->scoreboard->nprocs; i++, shm_mem += sizeof(struct fpm_scoreboard_proc_s)) {
+-			wp->scoreboard->procs[i] = shm_mem;
+-		}
+-
+-		wp->scoreboard->pm          = wp->config->pm;
+ 		wp->scoreboard->start_epoch = time(NULL);
+ 		strlcpy(wp->scoreboard->pool, wp->config->name, sizeof(wp->scoreboard->pool));
+ 	}
+@@ -163,28 +156,48 @@ struct fpm_scoreboard_s *fpm_scoreboard_get() /* {{{*/
+ }
+ /* }}} */
+ 
+-struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get(struct fpm_scoreboard_s *scoreboard, int child_index) /* {{{*/
++static inline struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get_ex(
++		struct fpm_scoreboard_s *scoreboard, int child_index, unsigned int nprocs) /* {{{*/
+ {
+ 	if (!scoreboard) {
+-		scoreboard = fpm_scoreboard;
++		return NULL;
+ 	}
+ 
+-	if (!scoreboard) {
++	if (child_index < 0 || (unsigned int)child_index >= nprocs) {
+ 		return NULL;
+ 	}
+ 
++	return &scoreboard->procs[child_index];
++}
++/* }}} */
++
++struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get(
++		struct fpm_scoreboard_s *scoreboard, int child_index) /* {{{*/
++{
++	if (!scoreboard) {
++		scoreboard = fpm_scoreboard;
++	}
++
+ 	if (child_index < 0) {
+ 		child_index = fpm_scoreboard_i;
+ 	}
+ 
+-	if (child_index < 0 || (unsigned int)child_index >= scoreboard->nprocs) {
+-		return NULL;
+-	}
++	return fpm_scoreboard_proc_get_ex(scoreboard, child_index, scoreboard->nprocs);
++}
++/* }}} */
+ 
+-	return scoreboard->procs[child_index];
++struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get_from_child(struct fpm_child_s *child) /* {{{*/
++{
++	struct fpm_worker_pool_s *wp = child->wp;
++	unsigned int nprocs = wp->config->pm_max_children;
++	struct fpm_scoreboard_s *scoreboard = wp->scoreboard;
++	int child_index = child->scoreboard_i;
++
++	return fpm_scoreboard_proc_get_ex(scoreboard, child_index, nprocs);
+ }
+ /* }}} */
+ 
++
+ struct fpm_scoreboard_s *fpm_scoreboard_acquire(struct fpm_scoreboard_s *scoreboard, int nohang) /* {{{ */
+ {
+ 	struct fpm_scoreboard_s *s;
+@@ -235,28 +248,28 @@ void fpm_scoreboard_proc_release(struct fpm_scoreboard_proc_s *proc) /* {{{ */
+ 	proc->lock = 0;
+ }
+ 
+-void fpm_scoreboard_free(struct fpm_scoreboard_s *scoreboard) /* {{{ */
++void fpm_scoreboard_free(struct fpm_worker_pool_s *wp) /* {{{ */
+ {
+-	size_t scoreboard_size, scoreboard_nprocs_size;
++	size_t scoreboard_procs_size;
++	struct fpm_scoreboard_s *scoreboard = wp->scoreboard;
+ 
+ 	if (!scoreboard) {
+ 		zlog(ZLOG_ERROR, "**scoreboard is NULL");
+ 		return;
+ 	}
+ 
+-	scoreboard_size        = sizeof(struct fpm_scoreboard_s) + (scoreboard->nprocs) * sizeof(struct fpm_scoreboard_proc_s *);
+-	scoreboard_nprocs_size = sizeof(struct fpm_scoreboard_proc_s) * scoreboard->nprocs;
++	scoreboard_procs_size = sizeof(struct fpm_scoreboard_proc_s) * wp->config->pm_max_children;
+ 
+-	fpm_shm_free(scoreboard, scoreboard_size + scoreboard_nprocs_size);
++	fpm_shm_free(scoreboard, sizeof(struct fpm_scoreboard_s) + scoreboard_procs_size);
+ }
+ /* }}} */
+ 
+-void fpm_scoreboard_child_use(struct fpm_scoreboard_s *scoreboard, int child_index, pid_t pid) /* {{{ */
++void fpm_scoreboard_child_use(struct fpm_child_s *child, pid_t pid) /* {{{ */
+ {
+ 	struct fpm_scoreboard_proc_s *proc;
+-	fpm_scoreboard = scoreboard;
+-	fpm_scoreboard_i = child_index;
+-	proc = fpm_scoreboard_proc_get(scoreboard, child_index);
++	fpm_scoreboard = child->wp->scoreboard;
++	fpm_scoreboard_i = child->scoreboard_i;
++	proc = fpm_scoreboard_proc_get_from_child(child);
+ 	if (!proc) {
+ 		return;
+ 	}
+@@ -265,18 +278,22 @@ void fpm_scoreboard_child_use(struct fpm_scoreboard_s *scoreboard, int child_ind
+ }
+ /* }}} */
+ 
+-void fpm_scoreboard_proc_free(struct fpm_scoreboard_s *scoreboard, int child_index) /* {{{ */
++void fpm_scoreboard_proc_free(struct fpm_child_s *child) /* {{{ */
+ {
++	struct fpm_worker_pool_s *wp = child->wp;
++	struct fpm_scoreboard_s *scoreboard = wp->scoreboard;
++	int child_index = child->scoreboard_i;
++
+ 	if (!scoreboard) {
+ 		return;
+ 	}
+ 
+-	if (child_index < 0 || (unsigned int)child_index >= scoreboard->nprocs) {
++	if (child_index < 0 || child_index >= wp->config->pm_max_children) {
+ 		return;
+ 	}
+ 
+-	if (scoreboard->procs[child_index] && scoreboard->procs[child_index]->used > 0) {
+-		memset(scoreboard->procs[child_index], 0, sizeof(struct fpm_scoreboard_proc_s));
++	if (scoreboard->procs[child_index].used > 0) {
++		memset(&scoreboard->procs[child_index], 0, sizeof(struct fpm_scoreboard_proc_s));
+ 	}
+ 
+ 	/* set this slot as free to avoid search on next alloc */
+@@ -284,41 +301,44 @@ void fpm_scoreboard_proc_free(struct fpm_scoreboard_s *scoreboard, int child_ind
+ }
+ /* }}} */
+ 
+-int fpm_scoreboard_proc_alloc(struct fpm_scoreboard_s *scoreboard, int *child_index) /* {{{ */
++int fpm_scoreboard_proc_alloc(struct fpm_child_s *child) /* {{{ */
+ {
+ 	int i = -1;
++	struct fpm_worker_pool_s *wp = child->wp;
++	struct fpm_scoreboard_s *scoreboard = wp->scoreboard;
++	int nprocs = wp->config->pm_max_children;
+ 
+-	if (!scoreboard || !child_index) {
++	if (!scoreboard) {
+ 		return -1;
+ 	}
+ 
+ 	/* first try the slot which is supposed to be free */
+-	if (scoreboard->free_proc >= 0 && (unsigned int)scoreboard->free_proc < scoreboard->nprocs) {
+-		if (scoreboard->procs[scoreboard->free_proc] && !scoreboard->procs[scoreboard->free_proc]->used) {
++	if (scoreboard->free_proc >= 0 && scoreboard->free_proc < nprocs) {
++		if (!scoreboard->procs[scoreboard->free_proc].used) {
+ 			i = scoreboard->free_proc;
+ 		}
+ 	}
+ 
+ 	if (i < 0) { /* the supposed free slot is not, let's search for a free slot */
+ 		zlog(ZLOG_DEBUG, "[pool %s] the proc->free_slot was not free. Let's search", scoreboard->pool);
+-		for (i = 0; i < (int)scoreboard->nprocs; i++) {
+-			if (scoreboard->procs[i] && !scoreboard->procs[i]->used) { /* found */
++		for (i = 0; i < nprocs; i++) {
++			if (!scoreboard->procs[i].used) { /* found */
+ 				break;
+ 			}
+ 		}
+ 	}
+ 
+ 	/* no free slot */
+-	if (i < 0 || i >= (int)scoreboard->nprocs) {
++	if (i < 0 || i >= nprocs) {
+ 		zlog(ZLOG_ERROR, "[pool %s] no free scoreboard slot", scoreboard->pool);
+ 		return -1;
+ 	}
+ 
+-	scoreboard->procs[i]->used = 1;
+-	*child_index = i;
++	scoreboard->procs[i].used = 1;
++	child->scoreboard_i = i;
+ 
+ 	/* supposed next slot is free */
+-	if (i + 1 >= (int)scoreboard->nprocs) {
++	if (i + 1 >= nprocs) {
+ 		scoreboard->free_proc = 0;
+ 	} else {
+ 		scoreboard->free_proc = i + 1;
+diff --git a/sapi/fpm/fpm/fpm_scoreboard.h b/sapi/fpm/fpm/fpm_scoreboard.h
+index abce616d769a3d088411726dd45e945eefb094e2..6405abb7cff18eca85aa4f40a592338676dd35bd 100644
+--- a/sapi/fpm/fpm/fpm_scoreboard.h
++++ b/sapi/fpm/fpm/fpm_scoreboard.h
+@@ -64,7 +64,7 @@ struct fpm_scoreboard_s {
+ 	unsigned int nprocs;
+ 	int free_proc;
+ 	unsigned long int slow_rq;
+-	struct fpm_scoreboard_proc_s *procs[];
++	struct fpm_scoreboard_proc_s procs[];
+ };
+ 
+ int fpm_scoreboard_init_main();
+@@ -73,18 +73,19 @@ int fpm_scoreboard_init_child(struct fpm_worker_pool_s *wp);
+ void fpm_scoreboard_update(int idle, int active, int lq, int lq_len, int requests, int max_children_reached, int slow_rq, int action, struct fpm_scoreboard_s *scoreboard);
+ struct fpm_scoreboard_s *fpm_scoreboard_get();
+ struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get(struct fpm_scoreboard_s *scoreboard, int child_index);
++struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_get_from_child(struct fpm_child_s *child);
+ 
+ struct fpm_scoreboard_s *fpm_scoreboard_acquire(struct fpm_scoreboard_s *scoreboard, int nohang);
+ void fpm_scoreboard_release(struct fpm_scoreboard_s *scoreboard);
+ struct fpm_scoreboard_proc_s *fpm_scoreboard_proc_acquire(struct fpm_scoreboard_s *scoreboard, int child_index, int nohang);
+ void fpm_scoreboard_proc_release(struct fpm_scoreboard_proc_s *proc);
+ 
+-void fpm_scoreboard_free(struct fpm_scoreboard_s *scoreboard);
++void fpm_scoreboard_free(struct fpm_worker_pool_s *wp);
+ 
+-void fpm_scoreboard_child_use(struct fpm_scoreboard_s *scoreboard, int child_index, pid_t pid);
++void fpm_scoreboard_child_use(struct fpm_child_s *child, pid_t pid);
+ 
+-void fpm_scoreboard_proc_free(struct fpm_scoreboard_s *scoreboard, int child_index);
+-int fpm_scoreboard_proc_alloc(struct fpm_scoreboard_s *scoreboard, int *child_index);
++void fpm_scoreboard_proc_free(struct fpm_child_s *child);
++int fpm_scoreboard_proc_alloc(struct fpm_child_s *child);
+ 
+ #ifdef HAVE_TIMES
+ float fpm_scoreboard_get_tick();
+diff --git a/sapi/fpm/fpm/fpm_status.c b/sapi/fpm/fpm/fpm_status.c
+index 1d78ebf849a42a537760bcced0511025023ab270..45852a5b39864c5e2952ed50223b16a6c3bc51c4 100644
+--- a/sapi/fpm/fpm/fpm_status.c
++++ b/sapi/fpm/fpm/fpm_status.c
+@@ -402,10 +402,10 @@ int fpm_status_handle_request(void) /* {{{ */
+ 
+ 			first = 1;
+ 			for (i=0; i<scoreboard_p->nprocs; i++) {
+-				if (!scoreboard_p->procs[i] || !scoreboard_p->procs[i]->used) {
++				if (!scoreboard_p->procs[i].used) {
+ 					continue;
+ 				}
+-				proc = *scoreboard_p->procs[i];
++				proc = scoreboard_p->procs[i];
+ 
+ 				if (first) {
+ 					first = 0;
+diff --git a/sapi/fpm/fpm/fpm_worker_pool.c b/sapi/fpm/fpm/fpm_worker_pool.c
+index 90e155975e468b8a14362d6cf55530a74994db50..96b7ca50fc2f893402fbe6909dcde6ddb4d5c8f2 100644
+--- a/sapi/fpm/fpm/fpm_worker_pool.c
++++ b/sapi/fpm/fpm/fpm_worker_pool.c
+@@ -43,7 +43,7 @@ static void fpm_worker_pool_cleanup(int which, void *arg) /* {{{ */
+ 		fpm_worker_pool_config_free(wp->config);
+ 		fpm_children_free(wp->children);
+ 		if ((which & FPM_CLEANUP_CHILD) == 0 && fpm_globals.parent_pid == getpid()) {
+-			fpm_scoreboard_free(wp->scoreboard);
++			fpm_scoreboard_free(wp);
+ 		}
+ 		fpm_worker_pool_free(wp);
+ 	}
