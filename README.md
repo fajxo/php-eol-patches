@@ -85,6 +85,11 @@ some earlier security backports):
   `php-7.4.33-CVE-2023-0568.patch`, `php-7.4.33-CVE-2023-0662.patch`,
   `php-7.4-openssl3.patch`, `php-7.4.33-libxml2.patch`.
 
+  Gentoo's `php-7.4.33-CVE-2023-0568.patch` is misnamed: it holds the
+  `php_crypt()` short-salt over-read fix, which is part of CVE-2023-0567.
+  The real CVE-2023-0568 fix (1-byte overrun in the open_basedir check,
+  `main/fopen_wrappers.c`) is not in the base of any version.
+
 `patches/base/php-X.Y.Z-gentoo-base.patch` is that whole difference as one
 patch (php.net tarball → first commit of the branch). It is here because the
 5.6 backport set is no longer on the Gentoo mirrors. The 5.6 base adds nine
