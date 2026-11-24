@@ -154,7 +154,7 @@ Adjust the path for your system.
 
 ## Testing
 
-Each version was built with gcc 16, once without and once with the patches,
+Each version was built with gcc 13, once without and once with the patches,
 and the PHP test suite (`.phpt`) was run on both builds:
 
 - The tests added for the 2026-11-19 advisories go from FAIL to PASS: 12 of 12
