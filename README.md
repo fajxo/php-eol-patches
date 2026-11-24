@@ -28,14 +28,20 @@ still the real fix.
 | GHSA-fm2m-fjf5-v3cp (CVE-2026-126714): RCE via a corrupted session file | ✔ | ✔ | ✔ |
 | GHSA-68fq-fh7h-f8gr (CVE-2026-128090): keyless phar signature accepted when a `.pubkey` exists | ✔ | ✔ | ✔ |
 | GHSA-5j3f-64r7-f564 (CVE-2026-129538): `PATH_INFO` underflow in CGI | ✔ | ✔ | ✔ |
+| GHSA-jm4m-qfqx-967m (CVE-2026-129291): FPM master keeps a freed worker's stdio event queued | ✔ | ✔ | ✔ |
+| GHSA-658j-r8rw-q6mx (CVE-2026-115560): `session.upload_progress.enabled` off by default ³ | ✔ | ✔ | ✔ |
 | CVE-2019-11043 (bug #78599): `env_path_info` underflow in FPM | ✔ | – ² | – ² |
 
 ¹ Only the 5.6 code has this bug.
 ² Already fixed in the 7.2.34 and 7.4.33 releases; 5.6 never got the fix.
+³ The upload progress hook these trees could reach is already a no-op since
+the PHP2Shell fix; this only changes the default to match.
 
 The GHSA rows are the 2026-11-19 PHP security release. Advisories from that
-release that are not in the table either touch code these versions do not have,
-or are already covered by the PHP2Shell fix.
+release that are not in the table touch code these versions do not have. For
+example, GHSA-mmf9-xm3v-hg2x (CVE-2026-127960) is in the HTTP header folding
+code that the 2025 fix for CVE-2025-1217 added, and these trees do not have
+that code.
 
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
@@ -155,6 +161,8 @@ and the PHP test suite (`.phpt`) was run on both builds:
   on 5.6, 11 of 11 on 7.2, 10 of 11 on 7.4. The one left on 7.4 (the
   `tzcache` use-after-free) passes on both builds, because the bug only shows
   under valgrind.
+- The GHSA-jm4m test (7.2, 7.4) passes on both builds: the freed event only
+  shows under valgrind or ASAN. 5.6 has no FPM test harness, so it has no test.
 - No test that passed before fails after the patches. The tests that still
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,

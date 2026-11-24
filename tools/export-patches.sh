@@ -31,7 +31,7 @@ for b in $branches; do
 	dir=patches/php-$ver
 	rm -rf "$dir" "$dir.patch"
 	mkdir -p "$dir"
-	git format-patch -q --no-signature -o "$dir" "$root..$ref"
+	git format-patch -q --no-signature --no-numbered -o "$dir" "$root..$ref"
 	cat "$dir"/*.patch > "$dir.patch"
 	echo "$b -> $dir ($(ls "$dir" | wc -l | tr -d ' ') patches)"
 done

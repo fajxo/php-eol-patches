@@ -1,8 +1,7 @@
 From 3a25d8658f1b50e521b1982381ca0be9fc9a9539 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
 Date: Sun, 8 Nov 2026 11:01:48 +0100
-Subject: [PATCH 03/13] phar: fix use-after-free in
- phar_call_openssl_signverify()
+Subject: [PATCH] phar: fix use-after-free in phar_call_openssl_signverify()
 
 In the IS_BOOL case, retval_ptr was efree()d and then read with
 Z_BVAL_P() to decide success. Read the result first. This path is used

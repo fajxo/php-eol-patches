@@ -1,7 +1,7 @@
 From 34ce6d92b62ce596eb06216e40ef76952f532cdc Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
 Date: Sun, 8 Nov 2026 09:20:45 +0100
-Subject: [PATCH 02/11] Build against OpenSSL 4.x (keeps 1.1-3.x working)
+Subject: [PATCH] Build against OpenSSL 4.x (keeps 1.1-3.x working)
 
 OpenSSL 4.0 (and 4.1, API-compatible) removed APIs that ext/openssl
 still used, so the build failed against dev-libs/openssl-4.1.0:
