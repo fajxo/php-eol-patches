@@ -1,0 +1,52 @@
+From 1555364e1d8ef597a2603a958969c6d7aaa2fe23 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 18:09:02 +0100
+Subject: [PATCH] Fix GHSA-ch8v-r6jh-4vvr: FILTER_SANITIZE_ENCODED leaves 0xFF
+ to stack garbage
+
+php_filter_encode_url() filled its 256-entry "must encode" table with
+memset(tmp, 1, sizeof(tmp) - 1), so the entry for 0xFF was uninitialised
+and whether that byte got percent-encoded depended on the stack. The whole
+table is now initialised.
+
+Backport of php-src 7ac9700d0d (Ilia Alshanetsky), same change as Sury's
+7.2 patch 0200.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/filter/sanitizing_filters.c                    |  2 +-
+ ext/filter/tests/filter_sanitize_encoded_0xff.phpt | 12 ++++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+ create mode 100644 ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+
+diff --git a/ext/filter/sanitizing_filters.c b/ext/filter/sanitizing_filters.c
+index 9b0a3aaa..c2e06651 100644
+--- a/ext/filter/sanitizing_filters.c
++++ b/ext/filter/sanitizing_filters.c
+@@ -71,7 +71,7 @@ static void php_filter_encode_url(zval *value, const unsigned char* chars, const
+ 	unsigned char *e = s + char_len;
+ 	zend_string *str;
+ 
+-	memset(tmp, 1, sizeof(tmp)-1);
++	memset(tmp, 1, sizeof(tmp));
+ 
+ 	while (s < e) {
+ 		tmp[*s++] = '\0';
+diff --git a/ext/filter/tests/filter_sanitize_encoded_0xff.phpt b/ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+new file mode 100644
+index 00000000..1ee61aba
+--- /dev/null
++++ b/ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+@@ -0,0 +1,12 @@
++--TEST--
++FILTER_SANITIZE_ENCODED percent-encodes 0xFF
++--EXTENSIONS--
++filter
++--FILE--
++<?php
++var_dump(filter_var("\xFF", FILTER_SANITIZE_ENCODED));
++var_dump(filter_var("\xFE\xFF\x00A", FILTER_SANITIZE_ENCODED));
++?>
++--EXPECT--
++string(3) "%FF"
++string(10) "%FE%FF%00A"

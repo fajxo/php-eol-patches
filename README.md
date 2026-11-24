@@ -43,6 +43,47 @@ example, GHSA-mmf9-xm3v-hg2x (CVE-2026-127960) is in the HTTP header folding
 code that the 2025 fix for CVE-2025-1217 added, and these trees do not have
 that code.
 
+### Older fixes (2026-11-24)
+
+Fixes for remotely reachable input and for SOAP that the Debian EOL packages
+by Ondřej Surý carry and these trees lacked. Each is a backport of the
+upstream php-src fix; the commit messages name it and Surý's patch.
+
+| Fix | 5.6.40 | 7.2.34 | 7.4.33 |
+| --- | :-: | :-: | :-: |
+| GHSA-3qrf-m4j2-pcrr (CVE-2023-3823): libxml2 global state / external entities | ✔ | ✔ | ✔ |
+| CVE-2022-31629 (bug #81727): cookie names mangled into `__Host-`/`__Secure-` | ✔ | ✔ | – ¹ |
+| GHSA-wpj3-hf5j-x4v4 (CVE-2024-2756): `__Host-`/`__Secure-` cookie bypass | ✔ | ✔ | ✔ |
+| CVE-2020-7070 (bug #79699): cookie names URL-decoded | ✔ | – ¹ | – ¹ |
+| GHSA-q6x7-frmf-grcw (CVE-2024-3096): `password_hash()` with a leading NUL byte | ✔ | ✔ | ✔ |
+| CVE-2020-7071 (bug #77423): `FILTER_VALIDATE_URL` accepts invalid userinfo | ✔ | ✔ ⁴ | – ¹ |
+| CVE-2021-21705 (bug #81122): SSRF bypass in `FILTER_VALIDATE_URL` | ✔ | ✔ | – ¹ |
+| GHSA-w8qr-v226-r27w (CVE-2024-5458): `FILTER_VALIDATE_URL` accepts invalid IPv6 URLs | – ² | ✔ | ✔ |
+| GHSA-9pqp-7h25-4f32 (CVE-2024-8925): multipart boundary longer than the read buffer | ✔ | ✔ | ✔ |
+| CVE-2019-11048 (bugs #78875, #78876): multipart lengths in signed ints | ✔ | – ¹ | – ¹ |
+| CVE-2019-11050, CVE-2019-11047 (bugs #78793, #78910): exif MakerNote over-reads | ✔ | – ¹ | – ¹ |
+| CVE-2020-7064 (bug #79282): exif reads uninitialised memory | ✔ | – ¹ | – ¹ |
+| CVE-2025-14177: `getimagesize()` returns uninitialised heap memory in `$imageinfo` | ✔ | – ¹ | – ¹ |
+| CVE-2020-7059 (bug #79099): `strip_tags()` reads before the buffer | ✔ | – ¹ | – ¹ |
+| CVE-2026-9672: bundled libgd GIF LZW decoder works on stale table data | ✔ | ✔ | ✔ |
+| GHSA-ch8v-r6jh-4vvr: `FILTER_SANITIZE_ENCODED` leaves 0xFF to stack garbage | ✔ | ✔ | ✔ |
+| GHSA-76gg-c692-v2mw (CVE-2023-3247): SoapClient HTTP Digest cnonce | ✔ ³ | ✔ | ✔ |
+| CVE-2021-21702 (bug #80672): NULL dereference in SoapClient on a hostile WSDL | ✔ | ✔ | – ¹ |
+| GHSA-453j-q27h-5p8x (CVE-2025-6491): SoapVar with a name over 2 GB | ✔ | ✔ | ✔ |
+| GHSA-85c2-q967-79q5 (CVE-2026-6722): stale SOAP `ref_map` pointer with Apache Map | ✔ | ✔ | ✔ |
+| GHSA-m33r-qmcv-p97q (CVE-2026-7261): SoapServer use-after-free with `SOAP_PERSISTENCE_SESSION` | ✔ | ✔ | ✔ |
+| GHSA-hmxp-6pc4-f3vv (CVE-2026-7262): NULL dereference on an Apache Map without value | ✔ | ✔ | ✔ |
+| GHSA-rgrp-mwpx-f6rm: unbounded recursion in SOAP XML parsing and decoding | ✔ | ✔ | ✔ |
+| GHSA-cj93-vc83-wgqv (CVE-2025-14181): SoapClient chunked response length overflow | ✔ | ✔ | ✔ |
+| SOAP: a DOCTYPE named like the root element was matched as an element (regression of the GHSA-4646 fix) | ✔ | ✔ | ✔ |
+
+¹ Already fixed in that release.
+² The code is not in 5.6.
+³ Only the minimal fix: 5.6 has no CSPRNG API, so the cnonce is less
+predictable but not cryptographically random.
+⁴ Only the `ext/filter` half: these trees keep Gentoo's `parse_url()` fix
+for the same bug.
+
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
 
@@ -153,6 +194,8 @@ These strings exist only in patched binaries:
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Fatal error: %s in %s on line %d'   # 1 = patched
 # GHSA-68fq (phar) fix
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'but the signature does not use openssl'   # 1 = patched
+# 2026-11-24 fixes (GHSA-9pqp multipart boundary)
+strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Boundary too large'   # 1 = patched
 ```
 
 Adjust the path for your system.
@@ -168,6 +211,11 @@ and the PHP test suite (`.phpt`) was run on both builds:
   under valgrind.
 - The GHSA-jm4m test (7.2, 7.4) passes on both builds: the freed event only
   shows under valgrind or ASAN. 5.6 has no FPM test harness, so it has no test.
+- The tests added for the 2026-11-24 fixes go from FAIL to PASS: 10 on 7.4,
+  13 on 7.2, 22 on 5.6. The others pass on both builds or skip: the
+  GHSA-3qrf tests need the `zend_test` extension, the GHSA-cj93 test is
+  marked resource-heavy, and on 5.6 the GHSA-453j test cannot build a string
+  over 2 GB.
 - No test that passed before fails after the patches. The tests that still
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,

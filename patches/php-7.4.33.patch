@@ -2847,3 +2847,2623 @@ index 89a7400a..a739a539 100644
  	ps_globals->session_status = php_session_none;
  	ps_globals->default_mod = NULL;
  	ps_globals->mod_user_implemented = 0;
+From e5b64eb0beee5ca35f5f160c49dbd1f3236bc635 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:37 +0100
+Subject: [PATCH] Fix GHSA-3qrf-m4j2-pcrr (CVE-2023-3823): reset libxml2 global
+ defaults before parsing
+
+libxml2 copies process-wide defaults (xmlSubstituteEntitiesDefault,
+xmlLoadExtDtdDefaultValue, validation, ...) into every new parser context.
+If anything in the process changed one of them, for example another
+extension or library, PHP's XML parsers (dom, simplexml, xmlreader, xsl,
+soap, xml) inherited it even though PHP never asked for it. Entity
+substitution and external DTD loading turned on that way allow XXE.
+
+The fix sets the defaults to known values around each parse
+(PHP_LIBXML_SANITIZE_GLOBALS / PHP_LIBXML_RESTORE_GLOBALS) or sets the
+options on the parser context directly.
+
+Backport of php-src c283c3ab0b (Niels Dossche) with the zend_test helper
+backport (zend_test_override_libxml_global_state, Remi Collet) that the
+upstream tests use; zend_test is a test-only extension. Same change as
+Sury's 7.4 patches 0068 and 0070.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/dom/document.c                            | 15 ++++++++
+ ext/dom/documentfragment.c                    |  2 +
+ ...xml_global_state_entity_loader_bypass.phpt | 37 +++++++++++++++++++
+ ext/libxml/php_libxml.h                       | 36 ++++++++++++++++++
+ ext/simplexml/simplexml.c                     |  6 +++
+ ...xml_global_state_entity_loader_bypass.phpt | 37 +++++++++++++++++++
+ ext/soap/php_xml.c                            |  2 +
+ ext/xml/compat.c                              |  2 +
+ ext/xmlreader/php_xmlreader.c                 |  9 +++++
+ ...xml_global_state_entity_loader_bypass.phpt | 36 ++++++++++++++++++
+ ext/xsl/xsltprocessor.c                       |  9 ++---
+ ext/zend_test/test.c                          | 22 +++++++++++
+ 12 files changed, 208 insertions(+), 5 deletions(-)
+ create mode 100644 ext/dom/tests/libxml_global_state_entity_loader_bypass.phpt
+ create mode 100644 ext/simplexml/tests/libxml_global_state_entity_loader_bypass.phpt
+ create mode 100644 ext/xmlreader/tests/libxml_global_state_entity_loader_bypass.phpt
+
+diff --git a/ext/dom/document.c b/ext/dom/document.c
+index b478e1a1..40653bb1 100644
+--- a/ext/dom/document.c
++++ b/ext/dom/document.c
+@@ -1458,6 +1458,7 @@ static xmlDocPtr dom_document_parser(zval *id, int mode, char *source, size_t so
+ 		options |= XML_PARSE_NOBLANKS;
+ 	}
+ 
++	php_libxml_sanitize_parse_ctxt_options(ctxt);
+ 	xmlCtxtUseOptions(ctxt, options);
+ 
+ 	ctxt->recovery = recover;
+@@ -1758,7 +1759,9 @@ PHP_FUNCTION(dom_document_xinclude)
+ 
+ 	DOM_GET_OBJ(docp, id, xmlDocPtr, intern);
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(xinclude);
+ 	err = xmlXIncludeProcessFlags(docp, (int)flags);
++	PHP_LIBXML_RESTORE_GLOBALS(xinclude);
+ 
+ 	/* XML_XINCLUDE_START and XML_XINCLUDE_END nodes need to be removed as these
+ 	are added via xmlXIncludeProcess to mark beginning and ending of xincluded document
+@@ -1798,6 +1801,7 @@ PHP_FUNCTION(dom_document_validate)
+ 
+ 	DOM_GET_OBJ(docp, id, xmlDocPtr, intern);
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(validate);
+ 	cvp = xmlNewValidCtxt();
+ 
+ 	cvp->userData = NULL;
+@@ -1809,6 +1813,7 @@ PHP_FUNCTION(dom_document_validate)
+ 	} else {
+ 		RETVAL_FALSE;
+ 	}
++	PHP_LIBXML_RESTORE_GLOBALS(validate);
+ 
+ 	xmlFreeValidCtxt(cvp);
+ 
+@@ -1843,14 +1848,18 @@ static void _dom_document_schema_validate(INTERNAL_FUNCTION_PARAMETERS, int type
+ 
+ 	DOM_GET_OBJ(docp, id, xmlDocPtr, intern);
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(new_parser_ctxt);
++
+ 	switch (type) {
+ 	case DOM_LOAD_FILE:
+ 		if (CHECK_NULL_PATH(source, source_len)) {
++			PHP_LIBXML_RESTORE_GLOBALS(new_parser_ctxt);
+ 			php_error_docref(NULL, E_WARNING, "Invalid Schema file source");
+ 			RETURN_FALSE;
+ 		}
+ 		valid_file = _dom_get_valid_file_path(source, resolved_path, MAXPATHLEN);
+ 		if (!valid_file) {
++			PHP_LIBXML_RESTORE_GLOBALS(new_parser_ctxt);
+ 			php_error_docref(NULL, E_WARNING, "Invalid Schema file source");
+ 			RETURN_FALSE;
+ 		}
+@@ -1871,6 +1880,7 @@ static void _dom_document_schema_validate(INTERNAL_FUNCTION_PARAMETERS, int type
+ 		parser);
+ 	sptr = xmlSchemaParse(parser);
+ 	xmlSchemaFreeParserCtxt(parser);
++	PHP_LIBXML_RESTORE_GLOBALS(new_parser_ctxt);
+ 	if (!sptr) {
+ 		php_error_docref(NULL, E_WARNING, "Invalid Schema");
+ 		RETURN_FALSE;
+@@ -1889,11 +1899,13 @@ static void _dom_document_schema_validate(INTERNAL_FUNCTION_PARAMETERS, int type
+ 		valid_opts |= XML_SCHEMA_VAL_VC_I_CREATE;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(validate);
+ 	xmlSchemaSetValidOptions(vptr, valid_opts);
+ 	xmlSchemaSetValidErrors(vptr, php_libxml_error_handler, php_libxml_error_handler, vptr);
+ 	is_valid = xmlSchemaValidateDoc(vptr, docp);
+ 	xmlSchemaFree(sptr);
+ 	xmlSchemaFreeValidCtxt(vptr);
++	PHP_LIBXML_RESTORE_GLOBALS(validate);
+ 
+ 	if (is_valid == 0) {
+ 		RETURN_TRUE;
+@@ -1964,12 +1976,14 @@ static void _dom_document_relaxNG_validate(INTERNAL_FUNCTION_PARAMETERS, int typ
+ 		return;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(parse);
+ 	xmlRelaxNGSetParserErrors(parser,
+ 		(xmlRelaxNGValidityErrorFunc) php_libxml_error_handler,
+ 		(xmlRelaxNGValidityWarningFunc) php_libxml_error_handler,
+ 		parser);
+ 	sptr = xmlRelaxNGParse(parser);
+ 	xmlRelaxNGFreeParserCtxt(parser);
++	PHP_LIBXML_RESTORE_GLOBALS(parse);
+ 	if (!sptr) {
+ 		php_error_docref(NULL, E_WARNING, "Invalid RelaxNG");
+ 		RETURN_FALSE;
+@@ -2068,6 +2082,7 @@ static void dom_load_html(INTERNAL_FUNCTION_PARAMETERS, int mode) /* {{{ */
+ 		ctxt->sax->error = php_libxml_ctx_error;
+ 		ctxt->sax->warning = php_libxml_ctx_warning;
+ 	}
++	php_libxml_sanitize_parse_ctxt_options(ctxt);
+ 	if (options) {
+ 		htmlCtxtUseOptions(ctxt, (int)options);
+ 	}
+diff --git a/ext/dom/documentfragment.c b/ext/dom/documentfragment.c
+index 9b222586..711c42f9 100644
+--- a/ext/dom/documentfragment.c
++++ b/ext/dom/documentfragment.c
+@@ -131,7 +131,9 @@ PHP_METHOD(domdocumentfragment, appendXML) {
+ 	}
+ 
+ 	if (data) {
++		PHP_LIBXML_SANITIZE_GLOBALS(parse);
+ 		err = xmlParseBalancedChunkMemory(nodep->doc, NULL, NULL, 0, (xmlChar *) data, &lst);
++		PHP_LIBXML_RESTORE_GLOBALS(parse);
+ 		if (err != 0) {
+ 			RETURN_FALSE;
+ 		}
+diff --git a/ext/dom/tests/libxml_global_state_entity_loader_bypass.phpt b/ext/dom/tests/libxml_global_state_entity_loader_bypass.phpt
+new file mode 100644
+index 00000000..7fc2a249
+--- /dev/null
++++ b/ext/dom/tests/libxml_global_state_entity_loader_bypass.phpt
+@@ -0,0 +1,37 @@
++--TEST--
++GHSA-3qrf-m4j2-pcrr (libxml global state entity loader bypass)
++--SKIPIF--
++<?php
++if (!extension_loaded('libxml')) die('skip libxml extension not available');
++if (!extension_loaded('dom')) die('skip dom extension not available');
++if (!extension_loaded('zend-test')) die('skip zend-test extension not available');
++if (!function_exists('zend_test_override_libxml_global_state')) die('skip not for Windows');
++?>
++--FILE--
++<?php
++
++$xml = "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY % bork SYSTEM \"php://nope\"> %bork;]><nothing/>";
++
++libxml_use_internal_errors(true);
++
++function parseXML($xml) {
++  $doc = new DOMDocument();
++  @$doc->loadXML($xml);
++  $doc->createDocumentFragment()->appendXML("&bork;");
++  foreach (libxml_get_errors() as $error) {
++    var_dump(trim($error->message));
++  }
++}
++
++parseXML($xml);
++zend_test_override_libxml_global_state();
++parseXML($xml);
++
++echo "Done\n";
++
++?>
++--EXPECT--
++string(25) "Entity 'bork' not defined"
++string(25) "Entity 'bork' not defined"
++string(25) "Entity 'bork' not defined"
++Done
+diff --git a/ext/libxml/php_libxml.h b/ext/libxml/php_libxml.h
+index cf936e95..92028d57 100644
+--- a/ext/libxml/php_libxml.h
++++ b/ext/libxml/php_libxml.h
+@@ -120,6 +120,42 @@ PHP_LIBXML_API void php_libxml_shutdown(void);
+ ZEND_TSRMLS_CACHE_EXTERN()
+ #endif
+ 
++/* Other extension may override the global state options, these global options
++ * are copied initially to ctxt->options. Set the options to a known good value.
++ * See libxml2 globals.c and parserInternals.c.
++ * The unique_name argument allows multiple sanitizes and restores within the
++ * same function, even nested is necessary. */
++#define PHP_LIBXML_SANITIZE_GLOBALS(unique_name) \
++	int xml_old_loadsubset_##unique_name = xmlLoadExtDtdDefaultValue; \
++	xmlLoadExtDtdDefaultValue = 0; \
++	int xml_old_validate_##unique_name = xmlDoValidityCheckingDefaultValue; \
++	xmlDoValidityCheckingDefaultValue = 0; \
++	int xml_old_pedantic_##unique_name = xmlPedanticParserDefault(0); \
++	int xml_old_substitute_##unique_name = xmlSubstituteEntitiesDefault(0); \
++	int xml_old_linenrs_##unique_name = xmlLineNumbersDefault(0); \
++	int xml_old_blanks_##unique_name = xmlKeepBlanksDefault(1);
++
++#define PHP_LIBXML_RESTORE_GLOBALS(unique_name) \
++	xmlLoadExtDtdDefaultValue = xml_old_loadsubset_##unique_name; \
++	xmlDoValidityCheckingDefaultValue = xml_old_validate_##unique_name; \
++	(void) xmlPedanticParserDefault(xml_old_pedantic_##unique_name); \
++	(void) xmlSubstituteEntitiesDefault(xml_old_substitute_##unique_name); \
++	(void) xmlLineNumbersDefault(xml_old_linenrs_##unique_name); \
++	(void) xmlKeepBlanksDefault(xml_old_blanks_##unique_name);
++
++/* Alternative for above, working directly on the context and not setting globals.
++ * Generally faster because no locking is involved, and this has the advantage that it sets the options to a known good value. */
++static zend_always_inline void php_libxml_sanitize_parse_ctxt_options(xmlParserCtxtPtr ctxt)
++{
++	ctxt->loadsubset = 0;
++	ctxt->validate = 0;
++	ctxt->pedantic = 0;
++	ctxt->replaceEntities = 0;
++	ctxt->linenumbers = 0;
++	ctxt->keepBlanks = 1;
++	ctxt->options = 0;
++}
++
+ #else /* HAVE_LIBXML */
+ #define libxml_module_ptr NULL
+ #endif
+diff --git a/ext/simplexml/simplexml.c b/ext/simplexml/simplexml.c
+index 2cdff0e6..101a9d8f 100644
+--- a/ext/simplexml/simplexml.c
++++ b/ext/simplexml/simplexml.c
+@@ -2194,7 +2194,9 @@ PHP_FUNCTION(simplexml_load_file)
+ 		RETURN_FALSE;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(read_file);
+ 	docp = xmlReadFile(filename, NULL, (int)options);
++	PHP_LIBXML_RESTORE_GLOBALS(read_file);
+ 
+ 	if (!docp) {
+ 		RETURN_FALSE;
+@@ -2248,7 +2250,9 @@ PHP_FUNCTION(simplexml_load_string)
+ 		RETURN_FALSE;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(read_memory);
+ 	docp = xmlReadMemory(data, (int)data_len, NULL, NULL, (int)options);
++	PHP_LIBXML_RESTORE_GLOBALS(read_memory);
+ 
+ 	if (!docp) {
+ 		RETURN_FALSE;
+@@ -2298,7 +2302,9 @@ SXE_METHOD(__construct)
+ 		return;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(read_file_or_memory);
+ 	docp = is_url ? xmlReadFile(data, NULL, (int)options) : xmlReadMemory(data, (int)data_len, NULL, NULL, (int)options);
++	PHP_LIBXML_RESTORE_GLOBALS(read_file_or_memory);
+ 
+ 	if (!docp) {
+ 		((php_libxml_node_object *)sxe)->document = NULL;
+diff --git a/ext/simplexml/tests/libxml_global_state_entity_loader_bypass.phpt b/ext/simplexml/tests/libxml_global_state_entity_loader_bypass.phpt
+new file mode 100644
+index 00000000..54f9d494
+--- /dev/null
++++ b/ext/simplexml/tests/libxml_global_state_entity_loader_bypass.phpt
+@@ -0,0 +1,37 @@
++--TEST--
++GHSA-3qrf-m4j2-pcrr (libxml global state entity loader bypass)
++--SKIPIF--
++<?php
++if (!extension_loaded('libxml')) die('skip libxml extension not available');
++if (!extension_loaded('simplexml')) die('skip simplexml extension not available');
++if (!extension_loaded('zend-test')) die('skip zend-test extension not available');
++if (!function_exists('zend_test_override_libxml_global_state')) die('skip not for Windows');
++?>
++--FILE--
++<?php
++
++$xml = "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY % bork SYSTEM \"php://nope\"> %bork;]><nothing/>";
++
++libxml_use_internal_errors(true);
++zend_test_override_libxml_global_state();
++
++echo "--- String test ---\n";
++simplexml_load_string($xml);
++echo "--- Constructor test ---\n";
++new SimpleXMLElement($xml);
++echo "--- File test ---\n";
++file_put_contents("libxml_global_state_entity_loader_bypass.tmp", $xml);
++simplexml_load_file("libxml_global_state_entity_loader_bypass.tmp");
++
++echo "Done\n";
++
++?>
++--CLEAN--
++<?php
++@unlink("libxml_global_state_entity_loader_bypass.tmp");
++?>
++--EXPECT--
++--- String test ---
++--- Constructor test ---
++--- File test ---
++Done
+diff --git a/ext/soap/php_xml.c b/ext/soap/php_xml.c
+index b180f19f..80cff10f 100644
+--- a/ext/soap/php_xml.c
++++ b/ext/soap/php_xml.c
+@@ -96,6 +96,7 @@ xmlDocPtr soap_xmlParseFile(const char *filename)
+ 	if (ctxt) {
+ 		zend_bool old;
+ 
++		php_libxml_sanitize_parse_ctxt_options(ctxt);
+ 		ctxt->keepBlanks = 0;
+ 		ctxt->sax->ignorableWhitespace = soap_ignorableWhitespace;
+ 		ctxt->sax->comment = soap_Comment;
+@@ -144,6 +145,7 @@ xmlDocPtr soap_xmlParseMemory(const void *buf, size_t buf_size)
+ 	if (ctxt) {
+ 		zend_bool old;
+ 
++		php_libxml_sanitize_parse_ctxt_options(ctxt);
+ 		ctxt->sax->ignorableWhitespace = soap_ignorableWhitespace;
+ 		ctxt->sax->comment = soap_Comment;
+ 		ctxt->sax->warning = NULL;
+diff --git a/ext/xml/compat.c b/ext/xml/compat.c
+index fc452565..57eb00dd 100644
+--- a/ext/xml/compat.c
++++ b/ext/xml/compat.c
+@@ -19,6 +19,7 @@
+ #include "php.h"
+ #if defined(HAVE_LIBXML) && (defined(HAVE_XML) || defined(HAVE_XMLRPC)) && !defined(HAVE_LIBEXPAT)
+ #include "expat_compat.h"
++#include "ext/libxml/php_libxml.h"
+ 
+ typedef struct _php_xml_ns {
+ 	xmlNsPtr nsptr;
+@@ -471,6 +472,7 @@ XML_ParserCreate_MM(const XML_Char *encoding, const XML_Memory_Handling_Suite *m
+ 		return NULL;
+ 	}
+ 
++	php_libxml_sanitize_parse_ctxt_options(parser->parser);
+ 	xmlCtxtUseOptions(parser->parser, XML_PARSE_OLDSAX);
+ 
+ 	parser->parser->replaceEntities = 1;
+diff --git a/ext/xmlreader/php_xmlreader.c b/ext/xmlreader/php_xmlreader.c
+index 06f56994..ae20c901 100644
+--- a/ext/xmlreader/php_xmlreader.c
++++ b/ext/xmlreader/php_xmlreader.c
+@@ -304,6 +304,7 @@ static xmlRelaxNGPtr _xmlreader_get_relaxNG(char *source, size_t source_len, siz
+ 		return NULL;
+ 	}
+ 
++	PHP_LIBXML_SANITIZE_GLOBALS(parse);
+ 	if (error_func || warn_func) {
+ 		xmlRelaxNGSetParserErrors(parser,
+ 			(xmlRelaxNGValidityErrorFunc) error_func,
+@@ -312,6 +313,7 @@ static xmlRelaxNGPtr _xmlreader_get_relaxNG(char *source, size_t source_len, siz
+ 	}
+ 	sptr = xmlRelaxNGParse(parser);
+ 	xmlRelaxNGFreeParserCtxt(parser);
++	PHP_LIBXML_RESTORE_GLOBALS(parse);
+ 
+ 	return sptr;
+ }
+@@ -881,7 +883,9 @@ PHP_METHOD(xmlreader, open)
+ 	valid_file = _xmlreader_get_valid_file_path(source, resolved_path, MAXPATHLEN );
+ 
+ 	if (valid_file) {
++		PHP_LIBXML_SANITIZE_GLOBALS(reader_for_file);
+ 		reader = xmlReaderForFile(valid_file, encoding, options);
++		PHP_LIBXML_RESTORE_GLOBALS(reader_for_file);
+ 	}
+ 
+ 	if (reader == NULL) {
+@@ -958,7 +962,9 @@ PHP_METHOD(xmlreader, setSchema)
+ 
+ 	intern = Z_XMLREADER_P(id);
+ 	if (intern && intern->ptr) {
++		PHP_LIBXML_SANITIZE_GLOBALS(schema);
+ 		retval = xmlTextReaderSchemaValidate(intern->ptr, source);
++		PHP_LIBXML_RESTORE_GLOBALS(schema);
+ 
+ 		if (retval == 0) {
+ 			RETURN_TRUE;
+@@ -1082,6 +1088,7 @@ PHP_METHOD(xmlreader, XML)
+ 			}
+ 			uri = (char *) xmlCanonicPath((const xmlChar *) resolved_path);
+ 		}
++		PHP_LIBXML_SANITIZE_GLOBALS(text_reader);
+ 		reader = xmlNewTextReader(inputbfr, uri);
+ 
+ 		if (reader != NULL) {
+@@ -1100,9 +1107,11 @@ PHP_METHOD(xmlreader, XML)
+ 					xmlFree(uri);
+ 				}
+ 
++				PHP_LIBXML_RESTORE_GLOBALS(text_reader);
+ 				return;
+ 			}
+ 		}
++		PHP_LIBXML_RESTORE_GLOBALS(text_reader);
+ 	}
+ 
+ 	if (uri) {
+diff --git a/ext/xmlreader/tests/libxml_global_state_entity_loader_bypass.phpt b/ext/xmlreader/tests/libxml_global_state_entity_loader_bypass.phpt
+new file mode 100644
+index 00000000..b0120b32
+--- /dev/null
++++ b/ext/xmlreader/tests/libxml_global_state_entity_loader_bypass.phpt
+@@ -0,0 +1,36 @@
++--TEST--
++GHSA-3qrf-m4j2-pcrr (libxml global state entity loader bypass)
++--SKIPIF--
++<?php
++if (!extension_loaded('libxml')) die('skip libxml extension not available');
++if (!extension_loaded('xmlreader')) die('skip xmlreader extension not available');
++if (!extension_loaded('zend-test')) die('skip zend-test extension not available');
++if (!function_exists('zend_test_override_libxml_global_state')) die('skip not for Windows');
++?>
++--FILE--
++<?php
++
++$xml = "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY % bork SYSTEM \"php://nope\"> %bork;]><nothing/>";
++
++libxml_use_internal_errors(true);
++zend_test_override_libxml_global_state();
++
++echo "--- String test ---\n";
++$reader = @XMLReader::xml($xml);
++$reader->read();
++echo "--- File test ---\n";
++file_put_contents("libxml_global_state_entity_loader_bypass.tmp", $xml);
++$reader = @XMLReader::open("libxml_global_state_entity_loader_bypass.tmp");
++$reader->read();
++
++echo "Done\n";
++
++?>
++--CLEAN--
++<?php
++@unlink("libxml_global_state_entity_loader_bypass.tmp");
++?>
++--EXPECT--
++--- String test ---
++--- File test ---
++Done
+diff --git a/ext/xsl/xsltprocessor.c b/ext/xsl/xsltprocessor.c
+index 079920d0..2d95b2ff 100644
+--- a/ext/xsl/xsltprocessor.c
++++ b/ext/xsl/xsltprocessor.c
+@@ -398,7 +398,7 @@ PHP_FUNCTION(xsl_xsltprocessor_import_stylesheet)
+ 	xmlDoc *doc = NULL, *newdoc = NULL;
+ 	xsltStylesheetPtr sheetp, oldsheetp;
+ 	xsl_object *intern;
+-	int prevSubstValue, prevExtDtdValue, clone_docu = 0;
++	int clone_docu = 0;
+ 	xmlNode *nodep = NULL;
+ 	zval *cloneDocu, member, rv;
+ 
+@@ -421,13 +421,12 @@ PHP_FUNCTION(xsl_xsltprocessor_import_stylesheet)
+ 	stylesheet document otherwise the node proxies will be a mess */
+ 	newdoc = xmlCopyDoc(doc, 1);
+ 	xmlNodeSetBase((xmlNodePtr) newdoc, (xmlChar *)doc->URL);
+-	prevSubstValue = xmlSubstituteEntitiesDefault(1);
+-	prevExtDtdValue = xmlLoadExtDtdDefaultValue;
++	PHP_LIBXML_SANITIZE_GLOBALS(parse);
++	xmlSubstituteEntitiesDefault(1);
+ 	xmlLoadExtDtdDefaultValue = XML_DETECT_IDS | XML_COMPLETE_ATTRS;
+ 
+ 	sheetp = xsltParseStylesheetDoc(newdoc);
+-	xmlSubstituteEntitiesDefault(prevSubstValue);
+-	xmlLoadExtDtdDefaultValue = prevExtDtdValue;
++	PHP_LIBXML_RESTORE_GLOBALS(parse);
+ 
+ 	if (!sheetp) {
+ 		xmlFreeDoc(newdoc);
+diff --git a/ext/zend_test/test.c b/ext/zend_test/test.c
+index 4f81adc6..cdfc1557 100644
+--- a/ext/zend_test/test.c
++++ b/ext/zend_test/test.c
+@@ -25,6 +25,11 @@
+ #include "ext/standard/info.h"
+ #include "php_test.h"
+ 
++#if defined(HAVE_LIBXML) && !defined(PHP_WIN32)
++# include <libxml/globals.h>
++# include <libxml/parser.h>
++#endif
++
+ static zend_class_entry *zend_test_interface;
+ static zend_class_entry *zend_test_class;
+ static zend_class_entry *zend_test_child_class;
+@@ -48,6 +53,20 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_zend_leak_variable, 0, 0, 1)
+ 	ZEND_ARG_INFO(0, variable)
+ ZEND_END_ARG_INFO()
+ 
++#if defined(HAVE_LIBXML) && !defined(PHP_WIN32)
++static ZEND_FUNCTION(zend_test_override_libxml_global_state)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++
++	xmlLoadExtDtdDefaultValue = 1;
++	xmlDoValidityCheckingDefaultValue = 1;
++	(void) xmlPedanticParserDefault(1);
++	(void) xmlSubstituteEntitiesDefault(1);
++	(void) xmlLineNumbersDefault(1);
++	(void) xmlKeepBlanksDefault(0);
++}
++#endif
++
+ ZEND_FUNCTION(zend_test_func)
+ {
+ 	/* dummy */
+@@ -297,6 +316,9 @@ static const zend_function_entry zend_test_functions[] = {
+ 	ZEND_FE(zend_terminate_string, arginfo_zend_terminate_string)
+ 	ZEND_FE(zend_leak_bytes, NULL)
+ 	ZEND_FE(zend_leak_variable, arginfo_zend_leak_variable)
++#if defined(HAVE_LIBXML) && !defined(PHP_WIN32)
++	ZEND_FE(zend_test_override_libxml_global_state, NULL)
++#endif
+ 	ZEND_FE_END
+ };
+ 
+From f084153e7d6f98c9b6f9b951d9c782fad4089618 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:37 +0100
+Subject: [PATCH] Fix GHSA-wpj3-hf5j-x4v4 (CVE-2024-2756): __Host-/__Secure-
+ cookie bypass
+
+The CVE-2022-31629 fix rejected a variable whose name only started with
+__Host- or __Secure- after name mangling, but it checked too early: later
+mangling of array names (for example "[__Host-" inside brackets) could
+still produce such a name. A cookie set by a sibling subdomain or over
+plain HTTP could then pose as a __Host-/__Secure- cookie. The check now
+runs right before the variable is added.
+
+Backport of php-src 093c08af25 (Niels Dossche), same change as Sury's 7.4
+patch 0073. The NEWS hunk is left out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/standard/tests/ghsa-wpj3-hf5j-x4v4.phpt | 63 +++++++++++++++++++++
+ main/php_variables.c                        | 41 +++++++++-----
+ 2 files changed, 90 insertions(+), 14 deletions(-)
+ create mode 100644 ext/standard/tests/ghsa-wpj3-hf5j-x4v4.phpt
+
+diff --git a/ext/standard/tests/ghsa-wpj3-hf5j-x4v4.phpt b/ext/standard/tests/ghsa-wpj3-hf5j-x4v4.phpt
+new file mode 100644
+index 00000000..77fcb680
+--- /dev/null
++++ b/ext/standard/tests/ghsa-wpj3-hf5j-x4v4.phpt
+@@ -0,0 +1,63 @@
++--TEST--
++ghsa-wpj3-hf5j-x4v4 (__Host-/__Secure- cookie bypass due to partial CVE-2022-31629 fix)
++--COOKIE--
++..Host-test=ignore_1;
++._Host-test=ignore_2;
++.[Host-test=ignore_3;
++_.Host-test=ignore_4;
++__Host-test=ignore_5;
++_[Host-test=ignore_6;
++[.Host-test=ignore_7;
++[_Host-test=ignore_8;
++[[Host-test=ignore_9;
++..Host-test[]=ignore_10;
++._Host-test[]=ignore_11;
++.[Host-test[]=ignore_12;
++_.Host-test[]=ignore_13;
++__Host-test[]=legitimate_14;
++_[Host-test[]=legitimate_15;
++[.Host-test[]=ignore_16;
++[_Host-test[]=ignore_17;
++[[Host-test[]=ignore_18;
++..Secure-test=ignore_1;
++._Secure-test=ignore_2;
++.[Secure-test=ignore_3;
++_.Secure-test=ignore_4;
++__Secure-test=ignore_5;
++_[Secure-test=ignore_6;
++[.Secure-test=ignore_7;
++[_Secure-test=ignore_8;
++[[Secure-test=ignore_9;
++..Secure-test[]=ignore_10;
++._Secure-test[]=ignore_11;
++.[Secure-test[]=ignore_12;
++_.Secure-test[]=ignore_13;
++__Secure-test[]=legitimate_14;
++_[Secure-test[]=legitimate_15;
++[.Secure-test[]=ignore_16;
++[_Secure-test[]=ignore_17;
++[[Secure-test[]=ignore_18;
++--FILE--
++<?php
++var_dump($_COOKIE);
++?>
++--EXPECT--
++array(3) {
++  ["__Host-test"]=>
++  array(1) {
++    [0]=>
++    string(13) "legitimate_14"
++  }
++  ["_"]=>
++  array(2) {
++    ["Host-test["]=>
++    string(13) "legitimate_15"
++    ["Secure-test["]=>
++    string(13) "legitimate_15"
++  }
++  ["__Secure-test"]=>
++  array(1) {
++    [0]=>
++    string(13) "legitimate_14"
++  }
++}
+diff --git a/main/php_variables.c b/main/php_variables.c
+index c920e4d5..5b5473d7 100644
+--- a/main/php_variables.c
++++ b/main/php_variables.c
+@@ -65,6 +65,21 @@ static zend_always_inline void php_register_variable_quick(const char *name, siz
+ 	zend_string_release_ex(key, 0);
+ }
+ 
++/* Discard variable if mangling made it start with __Host-, where pre-mangling it did not start with __Host-
++ * Discard variable if mangling made it start with __Secure-, where pre-mangling it did not start with __Secure- */
++static zend_bool php_is_forbidden_variable_name(const char *mangled_name, size_t mangled_name_len, const char *pre_mangled_name)
++{
++	if (mangled_name_len >= sizeof("__Host-")-1 && strncmp(mangled_name, "__Host-", sizeof("__Host-")-1) == 0 && strncmp(pre_mangled_name, "__Host-", sizeof("__Host-")-1) != 0) {
++		return 1;
++	}
++
++	if (mangled_name_len >= sizeof("__Secure-")-1 && strncmp(mangled_name, "__Secure-", sizeof("__Secure-")-1) == 0 && strncmp(pre_mangled_name, "__Secure-", sizeof("__Secure-")-1) != 0) {
++		return 1;
++	}
++
++	return 0;
++}
++
+ PHPAPI void php_register_variable_ex(char *var_name, zval *val, zval *track_vars_array)
+ {
+ 	char *p = NULL;
+@@ -115,20 +130,6 @@ PHPAPI void php_register_variable_ex(char *var_name, zval *val, zval *track_vars
+ 	}
+ 	var_len = p - var;
+ 
+-	/* Discard variable if mangling made it start with __Host-, where pre-mangling it did not start with __Host- */
+-	if (strncmp(var, "__Host-", sizeof("__Host-")-1) == 0 && strncmp(var_name, "__Host-", sizeof("__Host-")-1) != 0) {
+-		zval_ptr_dtor_nogc(val);
+-		free_alloca(var_orig, use_heap);
+-		return;
+-	}
+-
+-	/* Discard variable if mangling made it start with __Secure-, where pre-mangling it did not start with __Secure- */
+-	if (strncmp(var, "__Secure-", sizeof("__Secure-")-1) == 0 && strncmp(var_name, "__Secure-", sizeof("__Secure-")-1) != 0) {
+-		zval_ptr_dtor_nogc(val);
+-		free_alloca(var_orig, use_heap);
+-		return;
+-	}
+-
+ 	if (var_len==0) { /* empty variable name, or variable name with a space in it */
+ 		zval_ptr_dtor_nogc(val);
+ 		free_alloca(var_orig, use_heap);
+@@ -226,6 +227,12 @@ PHPAPI void php_register_variable_ex(char *var_name, zval *val, zval *track_vars
+ 					return;
+ 				}
+ 			} else {
++				if (php_is_forbidden_variable_name(index, index_len, var_name)) {
++					zval_ptr_dtor_nogc(val);
++					free_alloca(var_orig, use_heap);
++					return;
++				}
++
+ 				gpc_element_p = zend_symtable_str_find(symtable1, index, index_len);
+ 				if (!gpc_element_p) {
+ 					zval tmp;
+@@ -263,6 +270,12 @@ plain_var:
+ 				zval_ptr_dtor_nogc(val);
+ 			}
+ 		} else {
++			if (php_is_forbidden_variable_name(index, index_len, var_name)) {
++				zval_ptr_dtor_nogc(val);
++				free_alloca(var_orig, use_heap);
++				return;
++			}
++
+ 			zend_ulong idx;
+ 
+ 			/*
+From 666568af4fabd42f146d23de273d7f857670403f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:37 +0100
+Subject: [PATCH] Fix GHSA-q6x7-frmf-grcw (CVE-2024-3096): password_hash() with
+ a leading NUL byte
+
+bcrypt stops at the first NUL byte, so a password starting with "\0"
+hashed like the empty password, and password_verify() then accepted an
+empty password for that hash. password_hash() with bcrypt now fails with
+a warning ("Bcrypt password must not contain null character"), so no
+such hash is created.
+
+Backport of php-src 0ba5229a3f (Jakub Zelenka), same change as Sury's 7.4
+patch 0075.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/standard/password.c                                 | 5 +++++
+ ext/standard/tests/password/password_bcrypt_errors.phpt | 6 ++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/ext/standard/password.c b/ext/standard/password.c
+index 9fe7fb1a..af806702 100644
+--- a/ext/standard/password.c
++++ b/ext/standard/password.c
+@@ -260,6 +260,11 @@ static zend_string* php_password_bcrypt_hash(const zend_string *password, zend_a
+ 	zval *zcost;
+ 	zend_long cost = PHP_PASSWORD_BCRYPT_COST;
+ 
++	if (memchr(ZSTR_VAL(password), '\0', ZSTR_LEN(password))) {
++		php_error_docref(NULL, E_WARNING, "Bcrypt password must not contain null character");
++		return NULL;
++	}
++
+ 	if (options && (zcost = zend_hash_str_find(options, "cost", sizeof("cost")-1)) != NULL) {
+ 		cost = zval_get_long(zcost);
+ 	}
+diff --git a/ext/standard/tests/password/password_bcrypt_errors.phpt b/ext/standard/tests/password/password_bcrypt_errors.phpt
+index a0826080..f95b7267 100644
+--- a/ext/standard/tests/password/password_bcrypt_errors.phpt
++++ b/ext/standard/tests/password/password_bcrypt_errors.phpt
+@@ -16,6 +16,8 @@ var_dump(password_hash("foo", PASSWORD_BCRYPT, array("salt" => 123)));
+ 
+ var_dump(password_hash("foo", PASSWORD_BCRYPT, array("cost" => "foo")));
+ 
++var_dump(password_hash("null\0password", PASSWORD_BCRYPT));
++
+ ?>
+ --EXPECTF--
+ Warning: password_hash(): Invalid bcrypt cost parameter specified: 3 in %s on line %d
+@@ -41,3 +43,7 @@ NULL
+ 
+ Warning: password_hash(): Invalid bcrypt cost parameter specified: 0 in %s on line %d
+ NULL
++
++Warning: password_hash(): Bcrypt password must not contain null character in %s on line %d
++NULL
++
+From 99240917c96a3d5d8962fa282c653beea692ed14 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix GHSA-w8qr-v226-r27w (CVE-2024-5458): FILTER_VALIDATE_URL
+ accepts invalid IPv6 URLs
+
+The URL filter returned success as soon as it saw a bracketed IPv6 host
+and skipped the remaining checks (user and password characters), so URLs
+the filter should reject passed, which matters when validation is used to
+decide where a request may go.
+
+Backport of php-src 4066610b47 (Niels Dossche), same change as Sury's 7.4
+patch 0079.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/filter/logical_filters.c              | 35 ++++++++++---------
+ ext/filter/tests/ghsa-w8qr-v226-r27w.phpt | 41 +++++++++++++++++++++++
+ 2 files changed, 61 insertions(+), 15 deletions(-)
+ create mode 100644 ext/filter/tests/ghsa-w8qr-v226-r27w.phpt
+
+diff --git a/ext/filter/logical_filters.c b/ext/filter/logical_filters.c
+index e5e87c01..9c86ad07 100644
+--- a/ext/filter/logical_filters.c
++++ b/ext/filter/logical_filters.c
+@@ -91,7 +91,7 @@
+ #define FORMAT_IPV4    4
+ #define FORMAT_IPV6    6
+ 
+-static int _php_filter_validate_ipv6(char *str, size_t str_len, int ip[8]);
++static int _php_filter_validate_ipv6(const char *str, size_t str_len, int ip[8]);
+ 
+ static int php_filter_parse_int(const char *str, size_t str_len, zend_long *ret) { /* {{{ */
+ 	zend_long ctx_value;
+@@ -571,6 +571,14 @@ static int is_userinfo_valid(zend_string *str)
+ 	return 1;
+ }
+ 
++static zend_bool php_filter_is_valid_ipv6_hostname(const char *s, size_t l)
++{
++	const char *e = s + l;
++	const char *t = e - 1;
++
++	return *s == '[' && *t == ']' && _php_filter_validate_ipv6(s + 1, l - 2, NULL);
++}
++
+ void php_filter_validate_url(PHP_INPUT_FILTER_PARAM_DECL) /* {{{ */
+ {
+ 	php_url *url;
+@@ -596,7 +604,7 @@ void php_filter_validate_url(PHP_INPUT_FILTER_PARAM_DECL) /* {{{ */
+ 
+ 	if (url->scheme != NULL &&
+ 		(zend_string_equals_literal_ci(url->scheme, "http") || zend_string_equals_literal_ci(url->scheme, "https"))) {
+-		char *e, *s, *t;
++		const char *s;
+ 		size_t l;
+ 
+ 		if (url->host == NULL) {
+@@ -605,17 +613,14 @@ void php_filter_validate_url(PHP_INPUT_FILTER_PARAM_DECL) /* {{{ */
+ 
+ 		s = ZSTR_VAL(url->host);
+ 		l = ZSTR_LEN(url->host);
+-		e = s + l;
+-		t = e - 1;
+-
+-		/* An IPv6 enclosed by square brackets is a valid hostname */
+-		if (*s == '[' && *t == ']' && _php_filter_validate_ipv6((s + 1), l - 2, NULL)) {
+-			php_url_free(url);
+-			return;
+-		}
+ 
+-		// Validate domain
+-		if (!_php_filter_validate_domain(ZSTR_VAL(url->host), l, FILTER_FLAG_HOSTNAME)) {
++		if (
++			/* An IPv6 enclosed by square brackets is a valid hostname.*/
++			!php_filter_is_valid_ipv6_hostname(s, l) &&
++			/* Validate domain.
++			 * This includes a loose check for an IPv4 address. */
++			!_php_filter_validate_domain(ZSTR_VAL(url->host), l, FILTER_FLAG_HOSTNAME)
++		) {
+ 			php_url_free(url);
+ 			RETURN_VALIDATION_FAILED
+ 		}
+@@ -749,15 +754,15 @@ static int _php_filter_validate_ipv4(char *str, size_t str_len, int *ip) /* {{{
+ }
+ /* }}} */
+ 
+-static int _php_filter_validate_ipv6(char *str, size_t str_len, int ip[8]) /* {{{ */
++static int _php_filter_validate_ipv6(const char *str, size_t str_len, int ip[8]) /* {{{ */
+ {
+ 	int compressed_pos = -1;
+ 	int blocks = 0;
+ 	int num, n, i;
+ 	char *ipv4;
+-	char *end;
++	const char *end;
+ 	int ip4elm[4];
+-	char *s = str;
++	const char *s = str;
+ 
+ 	if (!memchr(str, ':', str_len)) {
+ 		return 0;
+diff --git a/ext/filter/tests/ghsa-w8qr-v226-r27w.phpt b/ext/filter/tests/ghsa-w8qr-v226-r27w.phpt
+new file mode 100644
+index 00000000..0092408e
+--- /dev/null
++++ b/ext/filter/tests/ghsa-w8qr-v226-r27w.phpt
+@@ -0,0 +1,41 @@
++--TEST--
++GHSA-w8qr-v226-r27w
++--EXTENSIONS--
++filter
++--FILE--
++<?php
++
++function test(string $input) {
++    var_dump(filter_var($input, FILTER_VALIDATE_URL));
++}
++
++echo "--- These ones should fail ---\n";
++test("http://t[est@127.0.0.1");
++test("http://t[est@[::1]");
++test("http://t[est@[::1");
++test("http://t[est@::1]");
++test("http://php.net\\@aliyun.com/aaa.do");
++test("http://test[@2001:db8:3333:4444:5555:6666:1.2.3.4]");
++test("http://te[st@2001:db8:3333:4444:5555:6666:1.2.3.4]");
++test("http://te[st@2001:db8:3333:4444:5555:6666:1.2.3.4");
++
++echo "--- These ones should work ---\n";
++test("http://test@127.0.0.1");
++test("http://test@[2001:db8:3333:4444:5555:6666:1.2.3.4]");
++test("http://test@[::1]");
++
++?>
++--EXPECT--
++--- These ones should fail ---
++bool(false)
++bool(false)
++bool(false)
++bool(false)
++bool(false)
++bool(false)
++bool(false)
++bool(false)
++--- These ones should work ---
++string(21) "http://test@127.0.0.1"
++string(50) "http://test@[2001:db8:3333:4444:5555:6666:1.2.3.4]"
++string(17) "http://test@[::1]"
+From aca41e8ef42f2618f64ac318acc74dbaf5554bad Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix GHSA-9pqp-7h25-4f32 (CVE-2024-8925): multipart boundary
+ longer than the read buffer
+
+A multipart/form-data boundary longer than the parser's read buffer was
+parsed wrongly, so form fields and uploads could be split or merged in
+ways the sender did not intend. Boundaries are now limited to what the
+parser handles correctly (FILLUNIT - 4 bytes, more than the 70 that
+RFC 1521 allows). With a longer one the body is not parsed and a
+"Boundary too large" warning is logged.
+
+Backport of php-src 19b49258d0 (Arnaud Le Blanc) with its follow-ups
+c70e256308 (skip the test on Windows) and Remi Collet's 7.x test
+adaptation; same change as Sury's 7.4 patches 0085, 0089 and 0092.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ main/rfc1867.c                       |   7 ++
+ tests/basic/GHSA-9pqp-7h25-4f32.inc  |   3 +
+ tests/basic/GHSA-9pqp-7h25-4f32.phpt | 103 +++++++++++++++++++++++++++
+ 3 files changed, 113 insertions(+)
+ create mode 100644 tests/basic/GHSA-9pqp-7h25-4f32.inc
+ create mode 100644 tests/basic/GHSA-9pqp-7h25-4f32.phpt
+
+diff --git a/main/rfc1867.c b/main/rfc1867.c
+index 4946df0c..503576c6 100644
+--- a/main/rfc1867.c
++++ b/main/rfc1867.c
+@@ -773,6 +773,13 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler) /* {{{ */
+ 		boundary_len = boundary_end-boundary;
+ 	}
+ 
++	/* Boundaries larger than FILLUNIT-strlen("\r\n--") characters lead to
++	 * erroneous parsing */
++	if (boundary_len > FILLUNIT-strlen("\r\n--")) {
++		sapi_module.sapi_error(E_WARNING, "Boundary too large in multipart/form-data POST data");
++		return;
++	}
++
+ 	/* Initialize the buffer */
+ 	if (!(mbuff = multipart_buffer_new(boundary, boundary_len))) {
+ 		sapi_module.sapi_error(E_WARNING, "Unable to initialize the input buffer");
+diff --git a/tests/basic/GHSA-9pqp-7h25-4f32.inc b/tests/basic/GHSA-9pqp-7h25-4f32.inc
+new file mode 100644
+index 00000000..adf72a36
+--- /dev/null
++++ b/tests/basic/GHSA-9pqp-7h25-4f32.inc
+@@ -0,0 +1,3 @@
++<?php
++print "Hello world\n";
++var_dump($_POST);
+diff --git a/tests/basic/GHSA-9pqp-7h25-4f32.phpt b/tests/basic/GHSA-9pqp-7h25-4f32.phpt
+new file mode 100644
+index 00000000..a1ead918
+--- /dev/null
++++ b/tests/basic/GHSA-9pqp-7h25-4f32.phpt
+@@ -0,0 +1,103 @@
++--TEST--
++GHSA-9pqp-7h25-4f32
++--SKIPIF--
++<?php
++if (!getenv('TEST_PHP_CGI_EXECUTABLE')) {
++    die("skip php-cgi not available");
++}
++if (substr(PHP_OS, 0, 3) == 'WIN') {
++    die("skip not for Windows in CI - probably resource issue");
++}
++?>
++--FILE--
++<?php
++
++const FILLUNIT = 5 * 1024;
++
++function test($boundaryLen) {
++    printf("Boundary len: %d\n", $boundaryLen);
++
++    $cmd = [
++        getenv('TEST_PHP_CGI_EXECUTABLE'),
++        '-C',
++        '-n',
++        '-dlog_errors=1',
++        __DIR__ . '/GHSA-9pqp-7h25-4f32.inc',
++    ];
++
++    $boundary = str_repeat('A', $boundaryLen);
++    $body = ""
++        . "--$boundary\r\n"
++        . "Content-Disposition: form-data; name=\"koko\"\r\n"
++        . "\r\n"
++        . "BBB\r\n--" . substr($boundary, 0, -1) . "CCC\r\n"
++        . "--$boundary--\r\n"
++        ;
++
++    $env = array_merge($_ENV, [
++        'REDIRECT_STATUS' => '1',
++        'CONTENT_TYPE' => "multipart/form-data; boundary=$boundary",
++        'CONTENT_LENGTH' => strlen($body),
++        'REQUEST_METHOD' => 'POST',
++        'SCRIPT_FILENAME' => __DIR__ . '/GHSA-9pqp-7h25-4f32.inc',
++    ]);
++
++    $spec = [
++        0 => ['pipe', 'r'],
++        1 => STDOUT,
++        2 => STDOUT,
++    ];
++
++    $pipes = [];
++
++    print "Starting...\n";
++
++    $handle = proc_open($cmd, $spec, $pipes, getcwd(), $env);
++
++    fwrite($pipes[0], $body);
++
++    $status = proc_close($handle);
++
++    print "\n";
++}
++
++for ($offset = -1; $offset <= 1; $offset++) {
++    test(FILLUNIT - strlen("\r\n--") + $offset);
++}
++
++?>
++--EXPECTF--
++Boundary len: 5115
++Starting...
++X-Powered-By: %s
++Content-type: text/html; charset=UTF-8
++
++Hello world
++array(1) {
++  ["koko"]=>
++  string(5124) "BBB
++--AAA%sCCC"
++}
++
++Boundary len: 5116
++Starting...
++X-Powered-By: %s
++Content-type: text/html; charset=UTF-8
++
++Hello world
++array(1) {
++  ["koko"]=>
++  string(5125) "BBB
++--AAA%sCCC"
++}
++
++Boundary len: 5117
++Starting...
++PHP Warning:  Boundary too large in multipart/form-data POST data in Unknown on line 0
++X-Powered-By: %s
++Content-type: text/html; charset=UTF-8
++
++Hello world
++array(0) {
++}
++
+From 9fc0ff60926fcb85dc260e047df8c3998dc34a4e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix CVE-2026-9672: bundled libgd GIF LZW decoder works on
+ stale table data
+
+On a clear code the GIF reader's LZW decoder reset table[1][0] instead of
+table[1][i], and it carried on after a corrupt code stream, so a crafted
+GIF made it work on stale or uninitialised table data. The decoder state
+is now zero-initialised, the table is reset correctly and a corrupt code
+stream ends decoding. PHP built with the bundled libgd (as Gentoo's
+ebuild builds it) reaches this through imagecreatefromgif().
+
+Backport of php-src fcd691b377 (Ilija Tovilo; patch by Pierre Joye), same
+change as Sury's 7.4 patch 0139.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/gd/libgd/gd_gif_in.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/ext/gd/libgd/gd_gif_in.c b/ext/gd/libgd/gd_gif_in.c
+index 1f697236..e055f902 100644
+--- a/ext/gd/libgd/gd_gif_in.c
++++ b/ext/gd/libgd/gd_gif_in.c
+@@ -450,7 +450,7 @@ LWZReadByte_(gdIOCtx *fd, LZW_STATIC_DATA *sd, char flag, int input_code_size, i
+ 			sd->table[1][i] = i;
+ 		}
+ 		for (; i < (1<<MAX_LWZ_BITS); ++i)
+-			sd->table[0][i] = sd->table[1][0] = 0;
++			sd->table[0][i] = sd->table[1][i] = 0;
+ 
+ 		sd->sp = sd->stack;
+ 
+@@ -494,6 +494,8 @@ LWZReadByte_(gdIOCtx *fd, LZW_STATIC_DATA *sd, char flag, int input_code_size, i
+ 
+ 			if (count != 0)
+ 				return -2;
++
++			return -2;
+ 		}
+ 
+ 		incode = code;
+@@ -560,7 +562,7 @@ ReadImage(gdImagePtr im, gdIOCtx *fd, int len, int height, unsigned char (*cmap)
+ 	int             v;
+ 	int             xpos = 0, ypos = 0, pass = 0;
+ 	int i;
+-	LZW_STATIC_DATA sd;
++	LZW_STATIC_DATA sd = {0};
+ 
+ 
+ 	/*
+From 9f55d8d885a3d1923ba89d7c6f9f6240d30bdaae Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix GHSA-ch8v-r6jh-4vvr: FILTER_SANITIZE_ENCODED leaves 0xFF
+ to stack garbage
+
+php_filter_encode_url() filled its 256-entry "must encode" table with
+memset(tmp, 1, sizeof(tmp) - 1), so the entry for 0xFF was uninitialised
+and whether that byte got percent-encoded depended on the stack. The whole
+table is now initialised.
+
+Backport of php-src 7ac9700d0d (Ilia Alshanetsky), same change as Sury's
+7.4 patch 0157.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/filter/sanitizing_filters.c                    |  2 +-
+ ext/filter/tests/filter_sanitize_encoded_0xff.phpt | 12 ++++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+ create mode 100644 ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+
+diff --git a/ext/filter/sanitizing_filters.c b/ext/filter/sanitizing_filters.c
+index c17dc024..47f7a627 100644
+--- a/ext/filter/sanitizing_filters.c
++++ b/ext/filter/sanitizing_filters.c
+@@ -69,7 +69,7 @@ static void php_filter_encode_url(zval *value, const unsigned char* chars, const
+ 	unsigned char *e = s + char_len;
+ 	zend_string *str;
+ 
+-	memset(tmp, 1, sizeof(tmp)-1);
++	memset(tmp, 1, sizeof(tmp));
+ 
+ 	while (s < e) {
+ 		tmp[*s++] = '\0';
+diff --git a/ext/filter/tests/filter_sanitize_encoded_0xff.phpt b/ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+new file mode 100644
+index 00000000..1ee61aba
+--- /dev/null
++++ b/ext/filter/tests/filter_sanitize_encoded_0xff.phpt
+@@ -0,0 +1,12 @@
++--TEST--
++FILTER_SANITIZE_ENCODED percent-encodes 0xFF
++--EXTENSIONS--
++filter
++--FILE--
++<?php
++var_dump(filter_var("\xFF", FILTER_SANITIZE_ENCODED));
++var_dump(filter_var("\xFE\xFF\x00A", FILTER_SANITIZE_ENCODED));
++?>
++--EXPECT--
++string(3) "%FF"
++string(10) "%FE%FF%00A"
+From b8fa60cf95bf18a98b7868b7fc30eaff40f8583d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix GHSA-76gg-c692-v2mw (CVE-2023-3247): SoapClient HTTP
+ Digest cnonce
+
+The client nonce for HTTP Digest auth was built from too few random bits,
+and if the random source failed the uninitialised buffer was sent anyway.
+It is now 16 random bytes, and the request fails if they cannot be read.
+
+Backport of php-src 126d517ce2 (Niels Dossche), same change as Sury's 7.4
+patch 0064. The NEWS hunk is left out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_http.c | 21 +++++++++++++--------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/ext/soap/php_http.c b/ext/soap/php_http.c
+index ee3dcbdc..e3a9afdb 100644
+--- a/ext/soap/php_http.c
++++ b/ext/soap/php_http.c
+@@ -666,18 +666,23 @@ try_again:
+ 			if ((digest = zend_hash_str_find(Z_OBJPROP_P(this_ptr), "_digest", sizeof("_digest")-1)) != NULL) {
+ 				if (Z_TYPE_P(digest) == IS_ARRAY) {
+ 					char          HA1[33], HA2[33], response[33], cnonce[33], nc[9];
+-					zend_long     nonce;
++					unsigned char nonce[16];
+ 					PHP_MD5_CTX   md5ctx;
+ 					unsigned char hash[16];
+ 
+-					php_random_bytes_throw(&nonce, sizeof(nonce));
+-					nonce &= 0x7fffffff;
++					if (UNEXPECTED(php_random_bytes_throw(&nonce, sizeof(nonce)) != SUCCESS)) {
++						ZEND_ASSERT(EG(exception));
++						php_stream_close(stream);
++						zend_hash_str_del(Z_OBJPROP_P(this_ptr), "httpurl", sizeof("httpurl")-1);
++						zend_hash_str_del(Z_OBJPROP_P(this_ptr), "httpsocket", sizeof("httpsocket")-1);
++						zend_hash_str_del(Z_OBJPROP_P(this_ptr), "_use_proxy", sizeof("_use_proxy")-1);
++						smart_str_free(&soap_headers_z);
++						smart_str_free(&soap_headers);
++						return FALSE;
++					}
+ 
+-					PHP_MD5Init(&md5ctx);
+-					snprintf(cnonce, sizeof(cnonce), ZEND_LONG_FMT, nonce);
+-					PHP_MD5Update(&md5ctx, (unsigned char*)cnonce, strlen(cnonce));
+-					PHP_MD5Final(hash, &md5ctx);
+-					make_digest(cnonce, hash);
++					php_hash_bin2hex(cnonce, nonce, sizeof(nonce));
++					cnonce[32] = 0;
+ 
+ 					if ((tmp = zend_hash_str_find(Z_ARRVAL_P(digest), "nc", sizeof("nc")-1)) != NULL &&
+ 					    Z_TYPE_P(tmp) == IS_LONG) {
+From 28bef7f9647dafad82b36f29b37fa0307d29ef22 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:38 +0100
+Subject: [PATCH] Fix GHSA-453j-q27h-5p8x (CVE-2025-6491): SoapVar with a name
+ over 2 GB
+
+libxml2 before 2.13 leaves a node with a NULL name when xmlNodeSetName()
+gets a name longer than 2 GB, and serialising the message then
+dereferences it. The name is reset to a sentinel in that case. With
+libxml2 2.13 and later the bug cannot happen; the change is harmless
+there.
+
+Backport of php-src 9cb3d8d200 (Ahmed Lekssays), same change as Sury's 7.4
+patch 0117.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/soap.c                      |  6 ++--
+ ext/soap/tests/soap_qname_crash.phpt | 48 ++++++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+ create mode 100644 ext/soap/tests/soap_qname_crash.phpt
+
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index 7429aebb..94f1db52 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -4457,8 +4457,10 @@ static xmlNodePtr serialize_zval(zval *val, sdlParamPtr param, char *paramName,
+ 	}
+ 	xmlParam = master_to_xml(enc, val, style, parent);
+ 	zval_ptr_dtor(&defval);
+-	if (!strcmp((char*)xmlParam->name, "BOGUS")) {
+-		xmlNodeSetName(xmlParam, BAD_CAST(paramName));
++	if (xmlParam != NULL) { 
++		if (xmlParam->name == NULL || strcmp((char*)xmlParam->name, "BOGUS") == 0) {
++			xmlNodeSetName(xmlParam, BAD_CAST(paramName));
++		}
+ 	}
+ 	return xmlParam;
+ }
+diff --git a/ext/soap/tests/soap_qname_crash.phpt b/ext/soap/tests/soap_qname_crash.phpt
+new file mode 100644
+index 00000000..7a1bf026
+--- /dev/null
++++ b/ext/soap/tests/soap_qname_crash.phpt
+@@ -0,0 +1,48 @@
++--TEST--
++Test SoapClient with excessively large QName prefix in SoapVar
++--EXTENSIONS--
++soap
++--SKIPIF--
++<?php
++if (PHP_INT_SIZE != 8) die("skip: 64-bit only");
++?>
++--INI--
++memory_limit=8G
++--FILE--
++<?php
++
++class TestSoapClient extends SoapClient {
++    public function __doRequest(
++        $request,
++        $location,
++        $action,
++        $version,
++        $one_way = false
++    ): ?string {
++        die($request);
++    }
++}
++
++$prefix = str_repeat("A", 2 * 1024 * 1024 * 1024);
++$qname = "{$prefix}:tag";
++
++echo "Attempting to create SoapVar with very large QName\n";
++
++$var = new SoapVar("value", XSD_QNAME, null, null, $qname);
++
++echo "Attempting encoding\n";
++
++$options = [
++    'location' => 'http://127.0.0.1/',
++    'uri' => 'urn:dummy',
++    'trace' => 1,
++    'exceptions' => true,
++];
++$client = new TestSoapClient(null, $options);
++$client->__soapCall("DummyFunction", [$var]);
++?>
++--EXPECT--
++Attempting to create SoapVar with very large QName
++Attempting encoding
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:dummy" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:DummyFunction><param0 xsi:type="xsd:QName">value</param0></ns1:DummyFunction></SOAP-ENV:Body></SOAP-ENV:Envelope>
+From 5539c2a7b60e8c5ed60006e2dfa7290b9606a16e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] Fix GHSA-85c2-q967-79q5 (CVE-2026-6722): stale SOAP ref_map
+ pointer with Apache Map
+
+SOAP_GLOBAL(ref_map) stored decoded values for href lookups without
+holding a reference. When decoding an Apache Map freed such a value, a
+later lookup used the freed zval: a use-after-free reachable from a SOAP
+message (SoapServer request or SoapClient response). The map now holds a
+reference and releases it when it is reset.
+
+Backport of php-src aee3b3ac9b (Ilija Tovilo), same change as Sury's 7.4
+patch 0128.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_encoding.c                 |  3 +-
+ ext/soap/tests/GHSA-85c2-q967-79q5.phpt | 61 +++++++++++++++++++++++++
+ 2 files changed, 63 insertions(+), 1 deletion(-)
+ create mode 100644 ext/soap/tests/GHSA-85c2-q967-79q5.phpt
+
+diff --git a/ext/soap/php_encoding.c b/ext/soap/php_encoding.c
+index a228c26c..93fcb817 100644
+--- a/ext/soap/php_encoding.c
++++ b/ext/soap/php_encoding.c
+@@ -367,6 +367,7 @@ static zend_bool soap_check_xml_ref(zval *data, xmlNodePtr node)
+ static void soap_add_xml_ref(zval *data, xmlNodePtr node)
+ {
+ 	if (SOAP_GLOBAL(ref_map)) {
++		Z_TRY_ADDREF_P(data);
+ 		zend_hash_index_update(SOAP_GLOBAL(ref_map), (zend_ulong)node, data);
+ 	}
+ }
+@@ -3428,7 +3429,7 @@ void encode_reset_ns()
+ 	} else {
+ 		SOAP_GLOBAL(ref_map) = emalloc(sizeof(HashTable));
+ 	}
+-	zend_hash_init(SOAP_GLOBAL(ref_map), 0, NULL, NULL, 0);
++	zend_hash_init(SOAP_GLOBAL(ref_map), 0, NULL, ZVAL_PTR_DTOR, 0);
+ }
+ 
+ void encode_finish()
+diff --git a/ext/soap/tests/GHSA-85c2-q967-79q5.phpt b/ext/soap/tests/GHSA-85c2-q967-79q5.phpt
+new file mode 100644
+index 00000000..8bcac26a
+--- /dev/null
++++ b/ext/soap/tests/GHSA-85c2-q967-79q5.phpt
+@@ -0,0 +1,61 @@
++--TEST--
++GHSA-85c2-q967-79q5: Stale SOAP_GLOBAL(ref_map) pointer with Apache Map
++--CREDITS--
++brettgervasoni
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++class Handler {
++    public function test(...$args) {
++        $GLOBALS['result'] = $args;
++    }
++}
++
++$envelope = <<<'XML'
++<?xml version="1.0" encoding="UTF-8"?>
++<soapenv:Envelope
++    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
++    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
++
++    <soapenv:Body>
++        <test>
++            <map xsi:type="apache:Map" xmlns:apache="http://xml.apache.org/xml-soap">
++                <item>
++                    <key>foo</key>
++                    <value id="stale"><object>bar</object></value>
++                </item>
++                <item>
++                    <key>foo</key>
++                    <value>baz</value>
++                </item>
++            </map>
++            <stale href="#stale"/>
++        </test>
++    </soapenv:Body>
++</soapenv:Envelope>
++XML;
++
++$s = new SoapServer(null, ['uri' => 'urn:a']);
++$s->setClass(Handler::class);
++$s->handle($envelope);
++var_dump($result);
++
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:a" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:nil="true"/></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++array(2) {
++  [0]=>
++  array(1) {
++    ["foo"]=>
++    string(3) "baz"
++  }
++  [1]=>
++  object(stdClass)#%d (1) {
++    ["object"]=>
++    string(3) "bar"
++  }
++}
+From fc61a4b84730f48c7e44df7fb05f534b191d6e54 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] Fix GHSA-m33r-qmcv-p97q (CVE-2026-7261): SoapServer
+ use-after-free with SOAP_PERSISTENCE_SESSION
+
+When parsing a SOAP header failed, a SoapServer with session persistence
+freed the service object stored in the session and kept using it.
+
+Backport of php-src db2a7f9348 (Ilija Tovilo), same change as Sury's 7.4
+patch 0129.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/soap.c                         | 12 ++++-
+ ext/soap/tests/GHSA-m33r-qmcv-p97q.phpt | 58 +++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 2 deletions(-)
+ create mode 100644 ext/soap/tests/GHSA-m33r-qmcv-p97q.phpt
+
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index 94f1db52..ccc21d13 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -1807,13 +1807,21 @@ PHP_METHOD(SoapServer, handle)
+ 					php_output_discard();
+ 					soap_server_fault_ex(function, &h->retval, h);
+ 					efree(fn_name);
+-					if (service->type == SOAP_CLASS && soap_obj) {zval_ptr_dtor(soap_obj);}
++					if (service->type == SOAP_CLASS && soap_obj) {
++						if (service->soap_class.persistence != SOAP_PERSISTENCE_SESSION) {
++							zval_ptr_dtor(soap_obj);
++						}
++					}
+ 					goto fail;
+ 				} else if (EG(exception)) {
+ 					php_output_discard();
+ 					_soap_server_exception(service, function, ZEND_THIS);
+ 					efree(fn_name);
+-					if (service->type == SOAP_CLASS && soap_obj) {zval_ptr_dtor(soap_obj);}
++					if (service->type == SOAP_CLASS && soap_obj) {
++						if (service->soap_class.persistence != SOAP_PERSISTENCE_SESSION) {
++							zval_ptr_dtor(soap_obj);
++						}
++					}
+ 					goto fail;
+ 				}
+ 			} else if (h->mustUnderstand) {
+diff --git a/ext/soap/tests/GHSA-m33r-qmcv-p97q.phpt b/ext/soap/tests/GHSA-m33r-qmcv-p97q.phpt
+new file mode 100644
+index 00000000..bcf441cc
+--- /dev/null
++++ b/ext/soap/tests/GHSA-m33r-qmcv-p97q.phpt
+@@ -0,0 +1,58 @@
++--TEST--
++GHSA-m33r-qmcv-p97q: Use-after-free after header parsing failure with SOAP_PERSISTENCE_SESSION
++--CREDITS--
++Ilia Alshanetsky (iliaal)
++--EXTENSIONS--
++soap
++session
++--FILE--
++<?php
++
++class Handler {
++    public function return()  {
++        return new SoapFault('Server', 'denied');
++    }
++    public function throw()  {
++        throw new SoapFault('Server', 'denied');
++    }
++    public function hello() {
++        return 'ok';
++    }
++}
++
++session_start();
++
++$srv = new SoapServer(null, ['uri' => 'urn:a']);
++$srv->setClass(Handler::class);
++$srv->setPersistence(SOAP_PERSISTENCE_SESSION);
++
++$srv->handle(<<<XML
++<?xml version="1.0" encoding="UTF-8"?>
++<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a="urn:a">
++    <soap:Header>
++        <a:return/>
++    </soap:Header>
++    <soap:Body>
++        <a:hello/>
++    </soap:Body>
++</soap:Envelope>
++XML);
++
++$srv->handle(<<<XML
++<?xml version="1.0" encoding="UTF-8"?>
++<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:a="urn:a">
++    <soap:Header>
++        <a:throw/>
++    </soap:Header>
++    <soap:Body>
++        <a:hello/>
++    </soap:Body>
++</soap:Envelope>
++XML);
++
++?>
++--EXPECT--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>denied</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>denied</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+From c42e1543878f8d0df25f7948757cf51baec59802 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] Fix GHSA-hmxp-6pc4-f3vv (CVE-2026-7262): NULL dereference on
+ an Apache Map without value
+
+The NULL check for a map item's value tested the wrong pointer, so a
+crafted Apache Map in a SOAP message crashed the worker.
+
+Backport of php-src 79551ab8b1 (Ilija Tovilo), same change as Sury's 7.4
+patch 0130.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_encoding.c                 |  2 +-
+ ext/soap/tests/GHSA-hmxp-6pc4-f3vv.phpt | 39 +++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+ create mode 100644 ext/soap/tests/GHSA-hmxp-6pc4-f3vv.phpt
+
+diff --git a/ext/soap/php_encoding.c b/ext/soap/php_encoding.c
+index 93fcb817..8d70c6bb 100644
+--- a/ext/soap/php_encoding.c
++++ b/ext/soap/php_encoding.c
+@@ -2706,7 +2706,7 @@ static zval *to_zval_map(zval *ret, encodeTypePtr type, xmlNodePtr data)
+ 			}
+ 
+ 			xmlValue = get_node(item->children, "value");
+-			if (!xmlKey) {
++			if (!xmlValue) {
+ 				soap_error0(E_ERROR,  "Encoding: Can't decode apache map, missing value");
+ 			}
+ 
+diff --git a/ext/soap/tests/GHSA-hmxp-6pc4-f3vv.phpt b/ext/soap/tests/GHSA-hmxp-6pc4-f3vv.phpt
+new file mode 100644
+index 00000000..e46ab2e4
+--- /dev/null
++++ b/ext/soap/tests/GHSA-hmxp-6pc4-f3vv.phpt
+@@ -0,0 +1,39 @@
++--TEST--
++GHSA-hmxp-6pc4-f3vv: Null pointer dereference on missing Apache map value
++--CREDITS--
++Ilia Alshanetsky (iliaal)
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++$request = <<<XML
++<?xml version="1.0" encoding="UTF-8"?>
++<soap:Envelope
++    xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
++    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
++    xmlns:apache="http://xml.apache.org/xml-soap">
++
++    <soap:Body>
++        <test>
++            <map xsi:type="apache:Map">
++                <item><key>hello</key></item>
++            </map>
++        </test>
++    </soap:Body>
++</soap:Envelope>
++XML;
++
++$server = new SoapServer(null, [
++    'uri' => 'urn:test',
++    'typemap' => [['type_name' => 'anything']],
++]);
++$server->addFunction('test');
++function test($m) { return null; }
++$server->handle($request);
++
++?>
++--EXPECT--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Can't decode apache map, missing value</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+From 0dff4bf501dd885efad05405c641b94b4b012730 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] Fix GHSA-rgrp-mwpx-f6rm: unbounded recursion in SOAP XML
+ parsing and decoding
+
+A deeply nested SOAP document, or a long or cyclic chain of href
+references, recursed without limit in cleanup_xml_node() and in the
+decoder and crashed the worker on stack exhaustion. cleanup_xml_node() is
+now iterative, documents nested deeper than SOAP_MAX_XML_DEPTH (2048) are
+rejected with libxml2 before 2.13 (newer libxml2 limits depth itself),
+and decoding, which follows href references, stops with a SOAP error past
+SOAP_MAX_DECODE_DEPTH.
+
+Backport of php-src 3655b79c7b (Alexandre Daubois), Sury's 7.4 patch
+0153. One hunk is merged by hand: the iterative cleanup_xml_node() keeps
+the XML_DTD_NODE branch that the GHSA-4646-p932-gw34 fix in this branch
+added, as in Sury's later patch 0205.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_encoding.c                       |   7 ++
+ ext/soap/php_soap.h                           |   3 +
+ ext/soap/php_xml.c                            | 102 ++++++++++++++----
+ ext/soap/soap.c                               |   1 +
+ .../tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt |  47 ++++++++
+ .../tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt |  43 ++++++++
+ ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt       |  89 +++++++++++++++
+ 7 files changed, 272 insertions(+), 20 deletions(-)
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+ create mode 100644 ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+
+diff --git a/ext/soap/php_encoding.c b/ext/soap/php_encoding.c
+index 8d70c6bb..064a2e17 100644
+--- a/ext/soap/php_encoding.c
++++ b/ext/soap/php_encoding.c
+@@ -558,7 +558,12 @@ static zval *master_to_zval_int(zval *ret, encodePtr encode, xmlNodePtr data)
+ 		}
+ 	}
+ 	if (encode->to_zval) {
++		if (SOAP_GLOBAL(decode_depth) >= SOAP_MAX_DECODE_DEPTH) {
++			soap_error0(E_ERROR, "Encoding: Nesting level too deep");
++		}
++		SOAP_GLOBAL(decode_depth)++;
+ 		ret = encode->to_zval(ret, &encode->details, data);
++		SOAP_GLOBAL(decode_depth)--;
+ 	}
+ 	return ret;
+ }
+@@ -3424,6 +3429,7 @@ void encode_reset_ns()
+ {
+ 	SOAP_GLOBAL(cur_uniq_ns) = 0;
+ 	SOAP_GLOBAL(cur_uniq_ref) = 0;
++	SOAP_GLOBAL(decode_depth) = 0;
+ 	if (SOAP_GLOBAL(ref_map)) {
+ 		zend_hash_destroy(SOAP_GLOBAL(ref_map));
+ 	} else {
+@@ -3436,6 +3442,7 @@ void encode_finish()
+ {
+ 	SOAP_GLOBAL(cur_uniq_ns) = 0;
+ 	SOAP_GLOBAL(cur_uniq_ref) = 0;
++	SOAP_GLOBAL(decode_depth) = 0;
+ 	if (SOAP_GLOBAL(ref_map)) {
+ 		zend_hash_destroy(SOAP_GLOBAL(ref_map));
+ 		efree(SOAP_GLOBAL(ref_map));
+diff --git a/ext/soap/php_soap.h b/ext/soap/php_soap.h
+index 8e8adb87..052c94b9 100644
+--- a/ext/soap/php_soap.h
++++ b/ext/soap/php_soap.h
+@@ -152,6 +152,8 @@ struct _soapService {
+ #define SOAP_SSL_METHOD_SSLv3   2
+ #define SOAP_SSL_METHOD_SSLv23  3
+ 
++#define SOAP_MAX_XML_DEPTH 2048
++#define SOAP_MAX_DECODE_DEPTH (SOAP_MAX_XML_DEPTH * 2)
+ 
+ ZEND_BEGIN_MODULE_GLOBALS(soap)
+ 	HashTable  defEncNs;     /* mapping of default namespaces to prefixes */
+@@ -177,6 +179,7 @@ ZEND_BEGIN_MODULE_GLOBALS(soap)
+ 	HashTable  wsdl_cache;
+ 	int        cur_uniq_ref;
+ 	HashTable *ref_map;
++	unsigned int decode_depth;
+ ZEND_END_MODULE_GLOBALS(soap)
+ 
+ #ifdef ZTS
+diff --git a/ext/soap/php_xml.c b/ext/soap/php_xml.c
+index 80cff10f..73633c2f 100644
+--- a/ext/soap/php_xml.c
++++ b/ext/soap/php_xml.c
+@@ -37,39 +37,75 @@ static int is_blank(const xmlChar* str)
+ 	return 1;
+ }
+ 
+-/* removes all empty text, comments and other insignoficant nodes */
++/* removes all empty text, comments and other insignoficant nodes.
++ * Iterative because recursion overflows the stack on a deep document. */
+ static void cleanup_xml_node(xmlNodePtr node)
+ {
+-	xmlNodePtr trav;
+-	xmlNodePtr del = NULL;
++	xmlNodePtr parent = node;
++	xmlNodePtr trav = node->children;
+ 
+-	trav = node->children;
+ 	while (trav != NULL) {
+-		if (del != NULL) {
+-			xmlUnlinkNode(del);
+-			xmlFreeNode(del);
+-			del = NULL;
+-		}
++		xmlNodePtr next = trav->next;
++
+ 		if (trav->type == XML_TEXT_NODE) {
+ 			if (is_blank(trav->content)) {
+-				del = trav;
++				xmlUnlinkNode(trav);
++				xmlFreeNode(trav);
+ 			}
+ 		} else if (trav->type == XML_DTD_NODE) {
+ 			/* Attribute-value entity references can share content with the DTD.
+ 			 * Keep it alive until the document itself is freed. */
+ 		} else if ((trav->type != XML_ELEMENT_NODE) &&
+ 		           (trav->type != XML_CDATA_SECTION_NODE)) {
+-			del = trav;
++			xmlUnlinkNode(trav);
++			xmlFreeNode(trav);
+ 		} else if (trav->children != NULL) {
+-			cleanup_xml_node(trav);
++			parent = trav;
++			trav = trav->children;
++			continue;
+ 		}
+-		trav = trav->next;
++
++		while (next == NULL) {
++			if (parent == node) {
++				return;
++			}
++			next = parent->next;
++			parent = parent->parent;
++		}
++		trav = next;
+ 	}
+-	if (del != NULL) {
+-		xmlUnlinkNode(del);
+-		xmlFreeNode(del);
++}
++
++#if LIBXML_VERSION < 21300
++static int is_nesting_too_deep(xmlNodePtr node)
++{
++	xmlNodePtr trav = node->children;
++	unsigned int depth = 0;
++
++	while (trav != NULL) {
++		/* An entity reference borrows its declaration as child list, and that
++		 * declaration hangs off the DTD, so descending leaves the document. */
++		if (trav->children != NULL &&
++		    trav->type != XML_ENTITY_REF_NODE &&
++		    trav->type != XML_DTD_NODE) {
++			if (++depth > SOAP_MAX_XML_DEPTH) {
++				return TRUE;
++			}
++			trav = trav->children;
++			continue;
++		}
++		while (trav->next == NULL) {
++			trav = trav->parent;
++			if (trav == node) {
++				return FALSE;
++			}
++			depth--;
++		}
++		trav = trav->next;
+ 	}
++	return FALSE;
+ }
++#endif
+ 
+ static void soap_ignorableWhitespace(void *ctx, const xmlChar *ch, int len)
+ {
+@@ -127,6 +163,15 @@ xmlDocPtr soap_xmlParseFile(const char *filename)
+ */
+ 
+ 	if (ret) {
++#if LIBXML_VERSION < 21300
++		if (is_nesting_too_deep((xmlNodePtr)ret)) {
++			/* php_sdl.c reports xmlGetLastError() as the reason, and libxml2 did
++			 * not fail here, so drop the error an earlier parse left behind. */
++			xmlResetLastError();
++			xmlFreeDoc(ret);
++			return NULL;
++		}
++#endif
+ 		cleanup_xml_node((xmlNodePtr)ret);
+ 	}
+ 	return ret;
+@@ -174,6 +219,13 @@ xmlDocPtr soap_xmlParseMemory(const void *buf, size_t buf_size)
+ 	xmlCleanupParser();
+ */
+ 
++#if LIBXML_VERSION < 21300
++	if (ret && is_nesting_too_deep((xmlNodePtr)ret)) {
++		xmlFreeDoc(ret);
++		ret = NULL;
++	}
++#endif
++
+ /*
+ 	if (ret) {
+ 		cleanup_xml_node((xmlNodePtr)ret);
+@@ -296,6 +348,8 @@ xmlNodePtr get_node_with_attribute_ex(xmlNodePtr node, char *name, char *name_ns
+ 
+ xmlNodePtr get_node_with_attribute_recursive_ex(xmlNodePtr node, char *name, char *name_ns, char *attribute, char *value, char *attr_ns)
+ {
++	unsigned int depth = 0;
++
+ 	while (node != NULL) {
+ 		if (node_is_equal_ex(node, name, name_ns)) {
+ 			xmlAttrPtr attr = get_attribute_ex(node->properties, attribute, attr_ns);
+@@ -303,11 +357,19 @@ xmlNodePtr get_node_with_attribute_recursive_ex(xmlNodePtr node, char *name, cha
+ 				return node;
+ 			}
+ 		}
+-		if (node->children != NULL) {
+-			xmlNodePtr tmp = get_node_with_attribute_recursive_ex(node->children, name, name_ns, attribute, value, attr_ns);
+-			if (tmp) {
+-				return tmp;
++		if (node->children != NULL &&
++		    node->type != XML_ENTITY_REF_NODE &&
++		    node->type != XML_DTD_NODE) {
++			node = node->children;
++			depth++;
++			continue;
++		}
++		while (node->next == NULL) {
++			if (depth == 0) {
++				return NULL;
+ 			}
++			node = node->parent;
++			depth--;
+ 		}
+ 		node = node->next;
+ 	}
+diff --git a/ext/soap/soap.c b/ext/soap/soap.c
+index ccc21d13..ec75d748 100644
+--- a/ext/soap/soap.c
++++ b/ext/soap/soap.c
+@@ -579,6 +579,7 @@ static void php_soap_init_globals(zend_soap_globals *soap_globals)
+ 	soap_globals->soap_version = SOAP_1_1;
+ 	soap_globals->mem_cache = NULL;
+ 	soap_globals->ref_map = NULL;
++	soap_globals->decode_depth = 0;
+ }
+ 
+ PHP_MSHUTDOWN_FUNCTION(soap)
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+new file mode 100644
+index 00000000..e07f78d8
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-chain.phpt
+@@ -0,0 +1,47 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on a chain of href references
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++/* The body stays four deep whatever $n is: the decoder walks the href chain. */
++function chain(int $n): string
++{
++    $links = '';
++    for ($i = 1; $i <= $n; $i++) {
++        $links .= '<x id="i' . $i . '">' . ($i < $n ? '<q href="#i' . ($i + 1) . '"/>' : 'leaf') . '</x>';
++    }
++
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><test><p href="#i1"/>'
++        . $links . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $GLOBALS['decoded'] = $arg;
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(chain(3));
++var_dump($GLOBALS['decoded']);
++
++$server->handle(chain(12000));
++
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++object(stdClass)#%d (1) {
++  ["q"]=>
++  object(stdClass)#%d (1) {
++    ["q"]=>
++    string(4) "leaf"
++  }
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Nesting level too deep</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+new file mode 100644
+index 00000000..5058ba10
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm-href-cycle.phpt
+@@ -0,0 +1,43 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on an array element referencing its own array
++--EXTENSIONS--
++soap
++--FILE--
++<?php
++
++function envelope(string $param): string
++{
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
++        . ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
++        . ' xmlns:e="http://schemas.xmlsoap.org/soap/encoding/"'
++        . ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
++        . '<s:Body><test>' . $param . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $GLOBALS['decoded'] = $arg;
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(envelope('<param xsi:type="e:Array" e:arrayType="xsi:string[2]"><i>a</i><i>b</i></param>'));
++var_dump($GLOBALS['decoded']);
++
++$server->handle(envelope('<param xsi:type="e:Array" e:arrayType="xsi:anyType[1]" id="x"><i href="#x"/></param>'));
++
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++array(2) {
++  [0]=>
++  string(1) "a"
++  [1]=>
++  string(1) "b"
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Nesting level too deep</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+diff --git a/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+new file mode 100644
+index 00000000..f3213962
+--- /dev/null
++++ b/ext/soap/tests/GHSA-rgrp-mwpx-f6rm.phpt
+@@ -0,0 +1,89 @@
++--TEST--
++GHSA-rgrp-mwpx-f6rm: Stack overflow on deeply nested XML
++--EXTENSIONS--
++soap
++--INI--
++soap.wsdl_cache_enabled=0
++--FILE--
++<?php
++
++function envelope(int $depth): string
++{
++    return '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><test>'
++        . str_repeat('<a>', $depth) . 'leaf' . str_repeat('</a>', $depth)
++        . '</test></s:Body></s:Envelope>';
++}
++
++function test($arg)
++{
++    $depth = 0;
++    while (is_object($arg)) {
++        $depth++;
++        $arg = $arg->a;
++    }
++    $GLOBALS['decoded'] = [$depth, $arg];
++
++    return 'ok';
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++
++$server->handle(envelope(200));
++var_dump($GLOBALS['decoded']);
++
++/* libxml2 2.13 rejects past 2048 despite XML_PARSE_HUGE, older ones do not. */
++$wsdl = __DIR__ . '/GHSA-rgrp-mwpx-f6rm.wsdl';
++foreach ([1000, 2100] as $depth) {
++    file_put_contents($wsdl, '<r>' . str_repeat('<a>', $depth) . 'leaf' . str_repeat('</a>', $depth) . '</r>');
++    try {
++        new SoapClient($wsdl);
++    } catch (SoapFault $e) {
++        echo rtrim($e->getMessage()), "\n";
++    }
++}
++
++/* A WSDL reached through an entity reference still loads. Its replacement tree cannot
++   be built deeper than the 2048 libxml2 2.13 enforces, so this pins the entity skip
++   rather than the limit. */
++$entity = __DIR__ . '/GHSA-rgrp-mwpx-f6rm-entity.wsdl';
++$desc = str_repeat('&#60;p&#62;', 300) . 'A test service.' . str_repeat('&#60;/p&#62;', 300);
++file_put_contents($entity, '<?xml version="1.0"?>
++<!DOCTYPE definitions [<!ENTITY desc "' . $desc . '">]>
++<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="urn:test" targetNamespace="urn:test" name="T">
++  <documentation>&desc;</documentation>
++  <message name="inMsg"/>
++  <portType name="pt"><operation name="op"><input message="tns:inMsg"/></operation></portType>
++  <binding name="b" type="tns:pt">
++    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
++    <operation name="op"><soap:operation soapAction="op"/><input><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input></operation>
++  </binding>
++  <service name="s"><port name="p" binding="tns:b"><soap:address location="http://example.org/"/></port></service>
++</definitions>');
++var_dump((new SoapClient($entity))->__getFunctions());
++
++$server->handle(envelope(3000));
++
++?>
++--CLEAN--
++<?php
++@unlink(__DIR__ . '/GHSA-rgrp-mwpx-f6rm.wsdl');
++@unlink(__DIR__ . '/GHSA-rgrp-mwpx-f6rm-entity.wsdl');
++?>
++--EXPECTF--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
++array(2) {
++  [0]=>
++  int(199)
++  [1]=>
++  string(4) "leaf"
++}
++SOAP-ERROR: Parsing WSDL: Couldn't find <definitions> in '%sGHSA-rgrp-mwpx-f6rm.wsdl'
++SOAP-ERROR: Parsing WSDL: Couldn't load from '%sGHSA-rgrp-mwpx-f6rm.wsdl'%S
++array(1) {
++  [0]=>
++  string(9) "void op()"
++}
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+From 46465c0608857e225758fdfdb022d1177cfd27c1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] Fix GHSA-cj93-vc83-wgqv (CVE-2025-14181): SoapClient chunked
+ response length overflow
+
+SoapClient kept the size of a chunked response in an int, so a server
+sending 2 GB or more overflowed it and the client wrote past its buffer.
+Sizes are now size_t with overflow checks and safe (re)allocation; the
+redirect Location path allocation is overflow-checked too.
+
+Backport of php-src b11bd1d939 (Nora Dossche, Jakub Zelenka) with the
+test rework 3aedde06bc (Jakub Zelenka) and Sury's SKIPIF fix for the
+test; same change as Sury's 7.4 patches 0154, 0158 and 0165.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_http.c                          |  17 +-
+ ext/soap/tests/bugs/GHSA-cj93-vc83-wgqv.phpt | 156 +++++++++++++++++++
+ 2 files changed, 167 insertions(+), 6 deletions(-)
+ create mode 100644 ext/soap/tests/bugs/GHSA-cj93-vc83-wgqv.phpt
+
+diff --git a/ext/soap/php_http.c b/ext/soap/php_http.c
+index e3a9afdb..e3c49f86 100644
+--- a/ext/soap/php_http.c
++++ b/ext/soap/php_http.c
+@@ -1135,7 +1135,7 @@ try_again:
+ 							char *t = ZSTR_VAL(phpurl->path);
+ 							char *p = strrchr(t, '/');
+ 							if (p) {
+-								zend_string *s = zend_string_alloc((p - t) + ZSTR_LEN(new_url->path) + 2, 0);
++								zend_string *s = zend_string_safe_alloc(1, p - t, ZSTR_LEN(new_url->path) + 2, 0);
+ 								strncpy(ZSTR_VAL(s), t, (p - t) + 1);
+ 								ZSTR_VAL(s)[(p - t) + 1] = 0;
+ 								strcat(ZSTR_VAL(s), ZSTR_VAL(new_url->path));
+@@ -1428,7 +1428,8 @@ static zend_string* get_http_body(php_stream *stream, int close, char *headers)
+ {
+ 	zend_string *http_buf = NULL;
+ 	char *header;
+-	int header_close = close, header_chunked = 0, header_length = 0, http_buf_size = 0;
++	int header_close = close, header_chunked = 0, header_length = 0;
++	size_t http_buf_size = 0;
+ 
+ 	if (!close) {
+ 		header = get_http_header_value(headers, "Connection: ");
+@@ -1458,14 +1459,14 @@ static zend_string* get_http_body(php_stream *stream, int close, char *headers)
+ 		done = FALSE;
+ 
+ 		while (!done) {
+-			int buf_size = 0;
++			unsigned int buf_size = 0;
+ 
+ 			php_stream_gets(stream, headerbuf, sizeof(headerbuf));
+ 			if (sscanf(headerbuf, "%x", &buf_size) > 0 ) {
+ 				if (buf_size > 0) {
+ 					size_t len_size = 0;
+ 
+-					if (http_buf_size + buf_size + 1 < 0) {
++					if (buf_size >= ZSTR_MAX_LEN - http_buf_size) {
+ 						if (http_buf) {
+ 							zend_string_release_ex(http_buf, 0);
+ 						}
+@@ -1473,7 +1474,7 @@ static zend_string* get_http_body(php_stream *stream, int close, char *headers)
+ 					}
+ 
+ 					if (http_buf) {
+-						http_buf = zend_string_realloc(http_buf, http_buf_size + buf_size, 0);
++						http_buf = zend_string_safe_realloc(http_buf, 1, http_buf_size, buf_size, 0);
+ 					} else {
+ 						http_buf = zend_string_alloc(buf_size, 0);
+ 					}
+@@ -1532,7 +1533,7 @@ static zend_string* get_http_body(php_stream *stream, int close, char *headers)
+ 		}
+ 
+ 	} else if (header_length) {
+-		if (header_length < 0 || header_length >= INT_MAX) {
++		if (header_length < 0 || header_length >= ZSTR_MAX_LEN) {
+ 			return NULL;
+ 		}
+ 		http_buf = zend_string_alloc(header_length, 0);
+@@ -1547,6 +1548,10 @@ static zend_string* get_http_body(php_stream *stream, int close, char *headers)
+ 		do {
+ 			ssize_t len_read;
+ 			if (http_buf) {
++				if (UNEXPECTED(http_buf_size >= ZSTR_MAX_LEN - 4096)) {
++					zend_string_efree(http_buf);
++					return NULL;
++				}
+ 				http_buf = zend_string_realloc(http_buf, http_buf_size + 4096, 0);
+ 			} else {
+ 				http_buf = zend_string_alloc(4096, 0);
+diff --git a/ext/soap/tests/bugs/GHSA-cj93-vc83-wgqv.phpt b/ext/soap/tests/bugs/GHSA-cj93-vc83-wgqv.phpt
+new file mode 100644
+index 00000000..dc17ce31
+--- /dev/null
++++ b/ext/soap/tests/bugs/GHSA-cj93-vc83-wgqv.phpt
+@@ -0,0 +1,156 @@
++--TEST--
++GHSA-cj93-vc83-wgqv
++--INI--
++soap.wsdl_cache_enabled=0
++memory_limit=-1
++--EXTENSIONS--
++soap
++--CONFLICTS--
++all
++--SKIPIF--
++<?php
++require __DIR__.'/../../../standard/tests/http/server.inc';
++http_server_skipif("tcp://127.0.0.1:12342");
++if (getenv("SKIP_SLOW_TESTS")) die('skip slow test');
++if (!getenv("SOAP_RUN_RESOURCE_HEAVY_TESTS")) die("skip SOAP resource-heavy test");
++if (PHP_INT_SIZE == 4) die('skip not for 32-bit systems due to memory constraints');
++
++if (!file_exists('/proc/meminfo')) {
++    die('skip Cannot check free RAM from /proc/meminfo on this platform');
++}
++
++/* The client allocates a ~4 GiB response buffer (a 2 GiB chunk plus the
++ * oversized realloc for the second chunk), so require real headroom to avoid
++ * swapping, which is what makes this test time out on constrained machines. */
++$free_ram = 0;
++if ($f = fopen("/proc/meminfo","r")) {
++    while (!feof($f)) {
++        if (preg_match('/MemFree[^\d]*(\d+)/i', fgets($f), $m)) {
++            $free_ram = max($free_ram, $m[1]/1024/1024);
++            if ($free_ram > 6) {
++                $enough_free_ram = true;
++            }
++        }
++    }
++}
++
++if (empty($enough_free_ram)) {
++    die(sprintf("skip need +6G free RAM, but only %01.2f available", $free_ram));
++}
++--FILE--
++<?php
++require __DIR__.'/../../../standard/tests/http/server.inc';
++
++function chunk_body($body, $n)
++{
++    $chunks = str_split($body, $n);
++    $chunks[] = '';
++
++    foreach ($chunks as $k => $v) {
++        $chunks[$k] = sprintf("%08x\r\n%s\r\n", strlen($v), $v);
++    }
++
++    return join('', $chunks);
++}
++
++$wsdl = file_get_contents(__DIR__.'/../server030.wsdl');
++
++$headers =
++    "HTTP/1.1 200 OK\r\n".
++    "Content-Type: text/xml;charset=utf-8\r\n".
++    "Transfer-Encoding: \t  chunked\t \r\n".
++    "Connection: close\r\n".
++    "\r\n";
++
++/* Custom minimal server. Unlike the generic http_server() helper it streams the
++ * 2 GiB filler in bounded blocks instead of materialising it (and a data://
++ * copy of it) in memory. That keeps the sender's footprint tiny: only the
++ * client needs to hold the large buffers, so total memory and run time stay far
++ * lower and the test no longer thrashes on slower machines. */
++function heavy_soap_server($wsdl, $headers)
++{
++    $server = stream_socket_server('tcp://localhost:0', $errno, $errstr);
++    if (!$server) {
++        return false;
++    }
++    $uri = 'http://' . stream_socket_get_name($server, false);
++
++    $pid = pcntl_fork();
++    if ($pid == -1) {
++        die('could not fork');
++    } else if ($pid) {
++        return ['pid' => $pid, 'uri' => $uri];
++    }
++
++    /* Child: streaming 2 GiB can exceed the 60s alarm the helper would use, so
++     * match the run-tests per-test timeout instead. */
++    pcntl_alarm(120);
++
++    $drain = static function ($sock) {
++        stream_set_blocking($sock, false);
++        while (!feof($sock)) {
++            $r = [$sock]; $w = $e = null;
++            if (!stream_select($r, $w, $e, 1)) continue;
++            $line = stream_get_line($sock, 8192, "\r\n");
++            if ($line === '') break;
++        }
++        stream_set_blocking($sock, true);
++    };
++
++    /* Response 1: the WSDL, chunked. */
++    $sock = stream_socket_accept($server, 60);
++    if ($sock) {
++        $drain($sock);
++        fwrite($sock, $headers . chunk_body($wsdl, 64));
++        fclose($sock);
++    }
++
++    /* Response 2: an oversized chunk. Only the size header of the second chunk
++     * is needed: the reallocation for it happens before its body is read, so on
++     * the unfixed code the overflow triggers on the first read into the
++     * undersized buffer. The 2 GiB first-chunk body is streamed in 8 MiB blocks
++     * rather than built as one string. */
++    $sock = stream_socket_accept($server, 60);
++    if ($sock) {
++        $drain($sock);
++        fwrite($sock, $headers);
++        fwrite($sock, sprintf("%08x\r\n", 0x7fffffff));
++
++        $remaining = 0x7fffffff;
++        $block = str_repeat('x', 1 << 23); // 8 MiB
++        $block_len = strlen($block);
++        while ($remaining > 0) {
++            $n = $remaining < $block_len ? $remaining : $block_len;
++            fwrite($sock, $n === $block_len ? $block : substr($block, 0, $n));
++            $remaining -= $n;
++        }
++
++        fwrite($sock, "\r\n");
++        fwrite($sock, sprintf("%08x\r\n", 0x7fffffff));
++        fwrite($sock, "xxxx");
++        fclose($sock);
++    }
++
++    exit(0);
++}
++
++['pid' => $pid, 'uri' => $uri] = heavy_soap_server($wsdl, $headers);
++
++$options = [
++    'trace' => false,
++    'location' => $uri,
++];
++
++$client = new SoapClient($uri, $options);
++
++$client->getItems();
++
++http_server_kill($pid);
++
++--EXPECTF--
++Fatal error: Uncaught SoapFault exception: [HTTP] Error Fetching http body, No Content-Length, connection closed or chunked data in %s:%d
++Stack trace:
++#0 [internal function]: SoapClient->__doRequest('<?xml version="...', '%s', 'http://testuri....', 1, 0)
++#1 %s(%d): SoapClient->__call('getItems', Array)
++#2 {main}
++  thrown in %s on line %d
+From 67746fa6ea29e9e722e1ab20d25325926762bf58 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Tue, 24 Nov 2026 14:28:39 +0100
+Subject: [PATCH] ext/soap: do not match the DTD node kept by GHSA-4646 as an
+ element
+
+The GHSA-4646-p932-gw34 fix keeps the DTD node in the document until it
+is freed. That node is named after the DOCTYPE, so looking up an element
+such as definitions, schema or Envelope could return the DTD node
+instead, and a WSDL, schema or request with a DOCTYPE named like its root
+element failed. node_is_equal_ex() now only matches element nodes.
+
+Backport of Jakub Zelenka's follow-up to the 2026-11-19 release, with
+Sury's change of its tests from --EXTENSIONS-- (not known to this
+version's run-tests) to SKIPIF; same change as Sury's 7.4 patches 0220
+and 0221.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_xml.c                            |  4 +++
+ .../tests/dtd_named_like_root_request.phpt    | 27 ++++++++++++++
+ .../dtd_named_like_root_request_input.phpt    | 25 +++++++++++++
+ .../tests/dtd_named_like_root_schema.phpt     | 22 ++++++++++++
+ .../tests/dtd_named_like_root_schema.wsdl     | 35 +++++++++++++++++++
+ .../dtd_named_like_root_schema_import.xsd     | 20 +++++++++++
+ .../dtd_named_like_root_schema_include.xsd    | 10 ++++++
+ ext/soap/tests/dtd_named_like_root_wsdl.phpt  | 16 +++++++++
+ ext/soap/tests/dtd_named_like_root_wsdl.wsdl  | 30 ++++++++++++++++
+ 9 files changed, 189 insertions(+)
+ create mode 100644 ext/soap/tests/dtd_named_like_root_request.phpt
+ create mode 100644 ext/soap/tests/dtd_named_like_root_request_input.phpt
+ create mode 100644 ext/soap/tests/dtd_named_like_root_schema.phpt
+ create mode 100644 ext/soap/tests/dtd_named_like_root_schema.wsdl
+ create mode 100644 ext/soap/tests/dtd_named_like_root_schema_import.xsd
+ create mode 100644 ext/soap/tests/dtd_named_like_root_schema_include.xsd
+ create mode 100644 ext/soap/tests/dtd_named_like_root_wsdl.phpt
+ create mode 100644 ext/soap/tests/dtd_named_like_root_wsdl.wsdl
+
+diff --git a/ext/soap/php_xml.c b/ext/soap/php_xml.c
+index 73633c2f..429a8fec 100644
+--- a/ext/soap/php_xml.c
++++ b/ext/soap/php_xml.c
+@@ -272,6 +272,10 @@ int attr_is_equal_ex(xmlAttrPtr node, char *name, char *ns)
+ 
+ int node_is_equal_ex(xmlNodePtr node, char *name, char *ns)
+ {
++	/* A DTD node can carry the same name but is not an xmlNode. */
++	if (node->type != XML_ELEMENT_NODE) {
++		return FALSE;
++	}
+ 	if (name == NULL || ((node->name) && strcmp((char*)node->name, name) == 0)) {
+ 		if (ns) {
+ 			xmlNsPtr nsPtr = node_find_ns(node);
+diff --git a/ext/soap/tests/dtd_named_like_root_request.phpt b/ext/soap/tests/dtd_named_like_root_request.phpt
+new file mode 100644
+index 00000000..4de437ec
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_request.phpt
+@@ -0,0 +1,27 @@
++--TEST--
++SOAP: DOCTYPE named like the envelope is not taken for it when rejecting a request
++--SKIPIF--
++<?php require_once('skipif.inc'); ?>
++--FILE--
++<?php
++function test($x) {
++    return $x;
++}
++
++$request = <<<XML
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE Envelope [<!NOTATION n SYSTEM "x">]>
++<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:ns1="urn:test">
++  <env:Body>
++    <ns1:test><param0>x</param0></ns1:test>
++  </env:Body>
++</env:Envelope>
++XML;
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++$server->handle($request);
++?>
++--EXPECT--
++<?xml version="1.0" encoding="UTF-8"?>
++<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope"><env:Body><env:Fault><env:Code><env:Value>env:Receiver</env:Value></env:Code><env:Reason><env:Text>DTD are not supported by SOAP</env:Text></env:Reason></env:Fault></env:Body></env:Envelope>
+diff --git a/ext/soap/tests/dtd_named_like_root_request_input.phpt b/ext/soap/tests/dtd_named_like_root_request_input.phpt
+new file mode 100644
+index 00000000..9bcf2bcb
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_request_input.phpt
+@@ -0,0 +1,25 @@
++--TEST--
++SOAP: DOCTYPE named like the envelope is not taken for it when rejecting a posted request
++--POST--
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE Envelope [<!NOTATION n SYSTEM "x">]>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test">
++  <SOAP-ENV:Body>
++    <ns1:test><param0>x</param0></ns1:test>
++  </SOAP-ENV:Body>
++</SOAP-ENV:Envelope>
++--SKIPIF--
++<?php require_once('skipif.inc'); ?>
++--FILE--
++<?php
++function test($x) {
++    return $x;
++}
++
++$server = new SoapServer(null, ['uri' => 'urn:test']);
++$server->addFunction('test');
++$server->handle();
++?>
++--EXPECT--
++<?xml version="1.0" encoding="UTF-8"?>
++<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>DTD are not supported by SOAP</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+diff --git a/ext/soap/tests/dtd_named_like_root_schema.phpt b/ext/soap/tests/dtd_named_like_root_schema.phpt
+new file mode 100644
+index 00000000..152ea728
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_schema.phpt
+@@ -0,0 +1,22 @@
++--TEST--
++SOAP: DOCTYPE named like the schema root element is not taken for it
++--SKIPIF--
++<?php require_once('skipif.inc'); ?>
++--INI--
++soap.wsdl_cache_enabled=0
++--FILE--
++<?php
++$client = new SoapClient(__DIR__ . '/dtd_named_like_root_schema.wsdl');
++var_dump($client->__getTypes());
++?>
++--EXPECT--
++array(2) {
++  [0]=>
++  string(30) "struct Imported {
++ string a;
++}"
++  [1]=>
++  string(30) "struct Included {
++ string b;
++}"
++}
+diff --git a/ext/soap/tests/dtd_named_like_root_schema.wsdl b/ext/soap/tests/dtd_named_like_root_schema.wsdl
+new file mode 100644
+index 00000000..be8c462c
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_schema.wsdl
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
++             xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
++             xmlns:xsd="http://www.w3.org/2001/XMLSchema"
++             xmlns:tns="urn:test"
++             targetNamespace="urn:test"
++             name="Test">
++  <types>
++    <xsd:schema targetNamespace="urn:test">
++      <xsd:import namespace="urn:imported" schemaLocation="dtd_named_like_root_schema_import.xsd"/>
++      <xsd:include schemaLocation="dtd_named_like_root_schema_include.xsd"/>
++    </xsd:schema>
++  </types>
++  <message name="echoRequest"><part name="p" type="tns:Included"/></message>
++  <message name="echoResponse"><part name="r" type="tns:Included"/></message>
++  <portType name="TestPort">
++    <operation name="echo">
++      <input message="tns:echoRequest"/>
++      <output message="tns:echoResponse"/>
++    </operation>
++  </portType>
++  <binding name="TestBinding" type="tns:TestPort">
++    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
++    <operation name="echo">
++      <soap:operation soapAction="urn:test#echo"/>
++      <input><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
++      <output><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
++    </operation>
++  </binding>
++  <service name="TestService">
++    <port name="TestPort" binding="tns:TestBinding">
++      <soap:address location="http://localhost/test"/>
++    </port>
++  </service>
++</definitions>
+diff --git a/ext/soap/tests/dtd_named_like_root_schema_import.xsd b/ext/soap/tests/dtd_named_like_root_schema_import.xsd
+new file mode 100644
+index 00000000..23291a19
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_schema_import.xsd
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!-- Same DOCTYPE shape as the W3C xmldsig-core-schema.xsd -->
++<!DOCTYPE schema
++  PUBLIC "-//W3C//DTD XMLSchema 200102//EN" "http://www.w3.org/2001/XMLSchema.dtd"
++ [
++   <!ATTLIST schema
++     xmlns:im CDATA #FIXED "urn:imported">
++   <!ENTITY im 'urn:imported'>
++   <!ENTITY % p ''>
++   <!ENTITY % s ''>
++  ]>
++<schema xmlns="http://www.w3.org/2001/XMLSchema"
++        xmlns:im="urn:imported"
++        targetNamespace="urn:imported">
++  <complexType name="Imported">
++    <sequence>
++      <element name="a" type="string"/>
++    </sequence>
++  </complexType>
++</schema>
+diff --git a/ext/soap/tests/dtd_named_like_root_schema_include.xsd b/ext/soap/tests/dtd_named_like_root_schema_include.xsd
+new file mode 100644
+index 00000000..faefc880
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_schema_include.xsd
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE schema PUBLIC "-//W3C//DTD XMLSchema 200102//EN" "http://www.w3.org/2001/XMLSchema.dtd">
++<schema xmlns="http://www.w3.org/2001/XMLSchema"
++        targetNamespace="urn:test">
++  <complexType name="Included">
++    <sequence>
++      <element name="b" type="string"/>
++    </sequence>
++  </complexType>
++</schema>
+diff --git a/ext/soap/tests/dtd_named_like_root_wsdl.phpt b/ext/soap/tests/dtd_named_like_root_wsdl.phpt
+new file mode 100644
+index 00000000..dd2fc960
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_wsdl.phpt
+@@ -0,0 +1,16 @@
++--TEST--
++SOAP: DOCTYPE named like the WSDL root element is not taken for it
++--SKIPIF--
++<?php require_once('skipif.inc'); ?>
++--INI--
++soap.wsdl_cache_enabled=0
++--FILE--
++<?php
++$client = new SoapClient(__DIR__ . '/dtd_named_like_root_wsdl.wsdl');
++var_dump($client->__getFunctions());
++?>
++--EXPECT--
++array(1) {
++  [0]=>
++  string(22) "string echo(string $p)"
++}
+diff --git a/ext/soap/tests/dtd_named_like_root_wsdl.wsdl b/ext/soap/tests/dtd_named_like_root_wsdl.wsdl
+new file mode 100644
+index 00000000..16430f4c
+--- /dev/null
++++ b/ext/soap/tests/dtd_named_like_root_wsdl.wsdl
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE definitions [<!NOTATION n SYSTEM "x">]>
++<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
++             xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
++             xmlns:xsd="http://www.w3.org/2001/XMLSchema"
++             xmlns:tns="urn:test"
++             targetNamespace="urn:test"
++             name="Test">
++  <message name="echoRequest"><part name="p" type="xsd:string"/></message>
++  <message name="echoResponse"><part name="r" type="xsd:string"/></message>
++  <portType name="TestPort">
++    <operation name="echo">
++      <input message="tns:echoRequest"/>
++      <output message="tns:echoResponse"/>
++    </operation>
++  </portType>
++  <binding name="TestBinding" type="tns:TestPort">
++    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
++    <operation name="echo">
++      <soap:operation soapAction="urn:test#echo"/>
++      <input><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
++      <output><soap:body use="encoded" namespace="urn:test" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
++    </operation>
++  </binding>
++  <service name="TestService">
++    <port name="TestPort" binding="tns:TestBinding">
++      <soap:address location="http://localhost/test"/>
++    </port>
++  </service>
++</definitions>
