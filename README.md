@@ -222,6 +222,14 @@ and the PHP test suite (`.phpt`) was run on both builds:
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,
   with identical TLS behaviour on both.
+- With all patches applied, each version was also built with gcc 16 using
+  `CFLAGS="... -std=gnu17 -fpermissive"`. Plain gcc 16 fails to build these
+  trees, and configure silently changes some results, because its test
+  programs are old C. With these two flags, the gcc 16 build has the same
+  `php_config.h` and the same extensions (`php -m`) as the gcc 13 build, and
+  the full test suite gives the same result on both. The one exception is on
+  5.6: two curl SSL-locking defines differ, which matters only for a
+  thread-safe (ZTS) build.
 
 Details are in each commit message.
 
