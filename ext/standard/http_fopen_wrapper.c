@@ -304,7 +304,7 @@ static zend_bool php_stream_http_response_headers_parse(php_stream_wrapper *wrap
 			zend_string_efree(last_header_line_str);
 			return 0;
 		}
-		if (header_info->location_len == 0) {
+		if (header_info->location == NULL) {
 			header_info->location = emalloc(last_header_value_len + 1);
 		} else if (header_info->location_len <= last_header_value_len) {
 			header_info->location = erealloc(header_info->location, last_header_value_len + 1);
@@ -1213,6 +1213,8 @@ out:
 		if (header_info.transfer_encoding) {
 			php_stream_filter_append(&stream->readfilters, header_info.transfer_encoding);
 		}
+	} else if (header_info.transfer_encoding) {
+		php_stream_filter_free(header_info.transfer_encoding);
 	}
 
 	return stream;
