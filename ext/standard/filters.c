@@ -788,7 +788,7 @@ static php_conv_err_t php_conv_qprint_encode_convert(php_conv_qprint_encode *ins
 	lb_ptr = inst->lb_ptr;
 	lb_cnt = inst->lb_cnt;
 
-	if ((in_pp == NULL || in_left_p == NULL) && (lb_ptr >=lb_cnt)) {
+	if (in_pp == NULL || in_left_p == NULL) {
 		return PHP_CONV_ERR_SUCCESS;
 	}
 
@@ -1016,7 +1016,7 @@ static php_conv_err_t php_conv_qprint_decode_convert(php_conv_qprint_decode *ins
 	lb_ptr = inst->lb_ptr;
 	lb_cnt = inst->lb_cnt;
 
-	if ((in_pp == NULL || in_left_p == NULL) && lb_cnt == lb_ptr) {
+	if (in_pp == NULL || in_left_p == NULL) {
 		if (inst->scan_stat != 0) {
 			return PHP_CONV_ERR_UNEXPECTED_EOS;
 		}
@@ -1113,8 +1113,7 @@ static php_conv_err_t php_conv_qprint_decode_convert(php_conv_qprint_decode *ins
 					*ps == (unsigned char)inst->lbchars[lb_cnt]) {
 					lb_cnt++;
 					scan_stat = 5;
-				}
-				if (*ps != '\t' && *ps != ' ') {
+				} else if (*ps != '\t' && *ps != ' ') {
 					err = PHP_CONV_ERR_INVALID_SEQ;
 					goto out;
 				}
@@ -1122,6 +1121,9 @@ static php_conv_err_t php_conv_qprint_decode_convert(php_conv_qprint_decode *ins
 			} break;
 
 			case 5: {
+				if (icnt == 0) {
+					goto out;
+				}
 				if (!inst->lbchars && lb_cnt == 1 && *ps == '\n') {
 					/* auto-detect soft line breaks, found network line break */
 					lb_cnt = lb_ptr = 0;
@@ -1135,15 +1137,13 @@ static php_conv_err_t php_conv_qprint_decode_convert(php_conv_qprint_decode *ins
 					/* soft line break */
 					lb_cnt = lb_ptr = 0;
 					scan_stat = 0;
-				} else if (icnt > 0) {
+				} else {
 					if (*ps == (unsigned char)inst->lbchars[lb_cnt]) {
 						lb_cnt++;
 						ps++, icnt--;
 					} else {
 						scan_stat = 6; /* no break for short-cut */
 					}
-				} else {
-					goto out;
 				}
 			} break;
 
