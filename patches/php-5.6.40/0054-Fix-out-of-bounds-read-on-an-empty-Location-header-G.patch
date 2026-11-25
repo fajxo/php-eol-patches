@@ -1,0 +1,135 @@
+From 1d0b583320e938881fbb7df3ff78ad0a3e8a38b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 12:21:46 +0100
+Subject: [PATCH] Fix out-of-bounds read on an empty Location header (GH-23467)
+
+Since the GHSA-52jp change above an empty Location allocates one byte
+and is followed, and the relative-redirect branch read location[1]
+past it, so a server could make the client follow a redirect built
+from heap garbage. The branch now uses the stored length and skips the
+join for an empty Location. The follow-up GH-23521 keeps the old
+handling of a one-character Location (resolved against the host root,
+as before).
+
+Our own port: Sury has no 5.6 patch for it. It follows php-src
+547566f17a (Ilia Alshanetsky) and 64664758cd (Jordi Kroon) as in
+Sury's 7.2 patches 0180 and 0181.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/standard/http_fopen_wrapper.c             |  4 +-
+ .../http/http_empty_location_redirect.phpt    | 36 +++++++++++++++++
+ .../http_single_char_location_redirect.phpt   | 39 +++++++++++++++++++
+ 3 files changed, 77 insertions(+), 2 deletions(-)
+ create mode 100644 ext/standard/tests/http/http_empty_location_redirect.phpt
+ create mode 100644 ext/standard/tests/http/http_single_char_location_redirect.phpt
+
+diff --git a/ext/standard/http_fopen_wrapper.c b/ext/standard/http_fopen_wrapper.c
+index 7b398763..ed27a87d 100644
+--- a/ext/standard/http_fopen_wrapper.c
++++ b/ext/standard/http_fopen_wrapper.c
+@@ -1119,7 +1119,7 @@ finish:
+ 
+ 			char *new_path = NULL;
+ 
+-			if (strlen(header_info.location) < 8 ||
++			if (header_info.location_len < 8 ||
+ 					(strncasecmp(header_info.location, "http://", sizeof("http://")-1) &&
+ 							strncasecmp(header_info.location, "https://", sizeof("https://")-1) &&
+ 							strncasecmp(header_info.location, "ftp://", sizeof("ftp://")-1) &&
+@@ -1127,7 +1127,7 @@ finish:
+ 			{
+ 				char *loc_path = NULL;
+ 				if (*header_info.location != '/') {
+-					if (*(header_info.location+1) != '\0' && resource->path) {
++					if (header_info.location_len > 1 && resource->path) {
+ 						char *s = strrchr(resource->path, '/');
+ 						if (!s) {
+ 							s = resource->path;
+diff --git a/ext/standard/tests/http/http_empty_location_redirect.phpt b/ext/standard/tests/http/http_empty_location_redirect.phpt
+new file mode 100644
+index 00000000..399c8c68
+--- /dev/null
++++ b/ext/standard/tests/http/http_empty_location_redirect.phpt
+@@ -0,0 +1,36 @@
++--TEST--
++Empty Location header must not over-read when building the redirect target
++--FILE--
++<?php
++$serverCode = <<<'CODE'
++$server = stream_socket_server("tcp://127.0.0.1:0", $errno, $errstr);
++phpt_notify_server_start($server);
++
++for ($n = 0; $n < 4; $n++) {
++    $conn = stream_socket_accept($server, 10);
++    if (!$conn) {
++        break;
++    }
++    $req = fgets($conn);
++    while (trim(fgets($conn)) !== '') {}
++    $uri = explode(' ', $req)[1];
++    if ($n < 3) {
++        fwrite($conn, "HTTP/1.1 302 Found\r\nLocation:\r\nContent-Length: 0\r\n\r\n");
++    } else {
++        $body = "uri=$uri";
++        fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($body) . "\r\n\r\n$body");
++    }
++    fclose($conn);
++}
++CODE;
++
++$clientCode = <<<'CODE'
++$ctx = stream_context_create(['http' => ['follow_location' => 1]]);
++echo @file_get_contents("http://{{ ADDR }}/a/b", false, $ctx), "\n";
++CODE;
++
++include sprintf("%s/ServerClientTestCase.inc", __DIR__);
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--EXPECT--
++uri=/
+diff --git a/ext/standard/tests/http/http_single_char_location_redirect.phpt b/ext/standard/tests/http/http_single_char_location_redirect.phpt
+new file mode 100644
+index 00000000..7888bae6
+--- /dev/null
++++ b/ext/standard/tests/http/http_single_char_location_redirect.phpt
+@@ -0,0 +1,39 @@
++--TEST--
++Single-char relative Location header keeps resolving against the host root (pre-GH-23467 behavior)
++--DESCRIPTION--
++Not RFC 3986 compliant ("x" against "/a/b" gives "/a/x"), but matches
++PHP's long-standing behavior of resolving against the host root. See GH-23521.
++--FILE--
++<?php
++$serverCode = <<<'CODE'
++$server = stream_socket_server("tcp://127.0.0.1:0", $errno, $errstr);
++phpt_notify_server_start($server);
++
++for ($n = 0; $n < 2; $n++) {
++    $conn = stream_socket_accept($server, 10);
++    if (!$conn) {
++        break;
++    }
++    $req = fgets($conn);
++    while (trim(fgets($conn)) !== '') {}
++    $uri = explode(' ', $req)[1];
++    if ($n < 1) {
++        fwrite($conn, "HTTP/1.1 302 Found\r\nLocation: x\r\nContent-Length: 0\r\n\r\n");
++    } else {
++        $body = "uri=$uri";
++        fwrite($conn, "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($body) . "\r\n\r\n$body");
++    }
++    fclose($conn);
++}
++CODE;
++
++$clientCode = <<<'CODE'
++$ctx = stream_context_create(['http' => ['follow_location' => 1]]);
++echo @file_get_contents("http://{{ ADDR }}/a/b", false, $ctx), "\n";
++CODE;
++
++include sprintf("%s/ServerClientTestCase.inc", __DIR__);
++ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
++?>
++--EXPECT--
++uri=/x

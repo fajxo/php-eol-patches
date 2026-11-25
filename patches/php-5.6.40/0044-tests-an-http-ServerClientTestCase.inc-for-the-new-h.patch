@@ -1,0 +1,305 @@
+From 606f1f65bb55bbdcfff69268b4601ee90e448bce Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 12:21:44 +0100
+Subject: [PATCH] tests: an http ServerClientTestCase.inc for the new http
+ tests
+
+The GHSA-hgf5 tests (and the GHSA-v8xr, -pcmh and -52jp tests below)
+come from branches whose openssl ServerClientTestCase.inc supports
+ephemeral ports (phpt_notify_server_start()). 5.6's does not, so this
+adds the 7.4 helper as ext/standard/tests/http/ServerClientTestCase.inc,
+without scalar and return type declarations, and the hgf5 tests include
+it. 5.6 writes the request in several parts, so their server reads up
+to the blank line instead of doing one fread(). Test change only.
+
+Sury's 5.6 patches 0278-0280 and 0318.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../tests/http/ServerClientTestCase.inc       | 199 ++++++++++++++++++
+ .../tests/http/ghsa-hgf5-96fm-v528-001.phpt   |   7 +-
+ .../tests/http/ghsa-hgf5-96fm-v528-002.phpt   |   7 +-
+ .../tests/http/ghsa-hgf5-96fm-v528-003.phpt   |   7 +-
+ 4 files changed, 214 insertions(+), 6 deletions(-)
+ create mode 100644 ext/standard/tests/http/ServerClientTestCase.inc
+
+diff --git a/ext/standard/tests/http/ServerClientTestCase.inc b/ext/standard/tests/http/ServerClientTestCase.inc
+new file mode 100644
+index 00000000..375f8086
+--- /dev/null
++++ b/ext/standard/tests/http/ServerClientTestCase.inc
+@@ -0,0 +1,199 @@
++<?php
++
++const WORKER_ARGV_VALUE = 'RUN_WORKER';
++
++const WORKER_DEFAULT_NAME = 'server';
++
++function phpt_notify($worker = WORKER_DEFAULT_NAME, $message = "")
++{
++    ServerClientTestCase::getInstance()->notify($worker, $message);
++}
++
++function phpt_wait($worker = WORKER_DEFAULT_NAME, $timeout = null)
++{
++    return ServerClientTestCase::getInstance()->wait($worker, $timeout);
++}
++
++function phpt_notify_server_start($server)
++{
++    ServerClientTestCase::getInstance()->notify_server_start($server);
++}
++
++function phpt_has_sslv3() {
++    static $result = null;
++    if (!is_null($result)) {
++        return $result;
++    }
++    $server = @stream_socket_server('sslv3://127.0.0.1:10013');
++    if ($result = !!$server) {
++        fclose($server);
++    }
++    return $result;
++}
++
++/**
++ * This is a singleton to let the wait/notify functions work
++ * I know it's horrible, but it's a means to an end
++ */
++class ServerClientTestCase
++{
++    private $isWorker = false;
++
++    private $workerHandle = [];
++
++    private $workerStdIn = [];
++
++    private $workerStdOut = [];
++
++    private static $instance;
++
++    public static function getInstance($isWorker = false)
++    {
++        if (!isset(self::$instance)) {
++            self::$instance = new self($isWorker);
++        }
++
++        return self::$instance;
++    }
++
++    public function __construct($isWorker = false)
++    {
++        if (!isset(self::$instance)) {
++            self::$instance = $this;
++        }
++
++        $this->isWorker = $isWorker;
++    }
++
++    private function spawnWorkerProcess($worker, $code)
++    {
++        if (defined("PHP_WINDOWS_VERSION_MAJOR")) {
++            $ini = php_ini_loaded_file();
++            $cmd = sprintf(
++                '%s %s "%s" %s',
++                PHP_BINARY, $ini ? "-n -c $ini" : "",
++                __FILE__,
++                WORKER_ARGV_VALUE
++            );
++        } else {
++            $cmd = sprintf(
++                '%s "%s" %s %s',
++                PHP_BINARY,
++                __FILE__,
++                WORKER_ARGV_VALUE,
++                $worker
++            );
++        }
++        $this->workerHandle[$worker] = proc_open(
++            $cmd,
++            [['pipe', 'r'], ['pipe', 'w'], STDERR],
++            $pipes
++        );
++        $this->workerStdIn[$worker] = $pipes[0];
++        $this->workerStdOut[$worker] = $pipes[1];
++
++        fwrite($this->workerStdIn[$worker], $code . "\n---\n");
++    }
++
++    private function cleanupWorkerProcess($worker)
++    {
++        fclose($this->workerStdIn[$worker]);
++        fclose($this->workerStdOut[$worker]);
++        proc_close($this->workerHandle[$worker]);
++    }
++
++    private function stripPhpTagsFromCode($code)
++    {
++        return preg_replace('/^\s*<\?(?:php)?|\?>\s*$/i', '', $code);
++    }
++
++    public function runWorker()
++    {
++        $code = '';
++
++        while (1) {
++            $line = fgets(STDIN);
++
++            if (trim($line) === "---") {
++                break;
++            }
++
++            $code .= $line;
++        }
++
++        eval($code);
++    }
++
++    /**
++     * Run client and all workers
++     *
++     * @param string       $clientCode The client PHP code
++     * @param string|array $workerCode
++     * @param bool         $ephemeral Select whether automatic port selection and automatic awaiting is used
++     * @return void
++     * @throws Exception
++     */
++    public function run($clientCode, $workerCode, $ephemeral = true)
++    {
++        if (!is_array($workerCode)) {
++            $workerCode = [WORKER_DEFAULT_NAME => $workerCode];
++        }
++        reset($workerCode);
++        $code = current($workerCode);
++        $worker = key($workerCode);
++        while ($worker != null) {
++            $this->spawnWorkerProcess($worker, $this->stripPhpTagsFromCode($code));
++            $code = next($workerCode);
++            if ($ephemeral) {
++                $addr = trim($this->wait($worker));
++                if (empty($addr)) {
++                    throw new \Exception("Failed server start");
++                }
++                if ($code === false) {
++                    $clientCode = preg_replace('/{{\s*ADDR\s*}}/', $addr, $clientCode);
++                } else {
++                    $code = preg_replace('/{{\s*ADDR\s*}}/', $addr, $code);
++                }
++            }
++            $worker = key($workerCode);
++        }
++
++        eval($this->stripPhpTagsFromCode($clientCode));
++        foreach ($workerCode as $worker => $code) {
++            $this->cleanupWorkerProcess($worker);
++        }
++    }
++
++    public function wait($worker, $timeout = null)
++    {
++        $handle = $this->isWorker ? STDIN : $this->workerStdOut[$worker];
++        if ($timeout === null) {
++            return fgets($handle);
++        }
++
++        stream_set_blocking($handle, false);
++        $read = [$handle];
++        $result = stream_select($read, $write, $except, $timeout);
++        if (!$result) {
++            return null;
++        }
++
++        $result = fgets($handle);
++        stream_set_blocking($handle, true);
++        return $result;
++    }
++
++    public function notify($worker, $message = "")
++    {
++        fwrite($this->isWorker ? STDOUT : $this->workerStdIn[$worker], "$message\n");
++    }
++
++    public function notify_server_start($server)
++    {
++        echo stream_socket_get_name($server, false) . "\n";
++    }
++}
++
++if (isset($argv[1]) && $argv[1] === WORKER_ARGV_VALUE) {
++    ServerClientTestCase::getInstance(true)->runWorker();
++}
+diff --git a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-001.phpt b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-001.phpt
+index c8dcd47a..0ec338ab 100644
+--- a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-001.phpt
++++ b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-001.phpt
+@@ -17,7 +17,10 @@ $serverCode = <<<'CODE'
+ 
+     phpt_notify(WORKER_DEFAULT_NAME, "server-accepted");
+ 
+-    $result = fread($conn, 1024);
++    $result = '';
++    while (strpos($result, "\r\n\r\n") === false && !feof($conn)) {
++        $result .= fread($conn, 1024);
++    }
+     $encoded_result = base64_encode($result);
+ 
+     fwrite($conn, "HTTP/1.0 200 Ok\r\nContent-Type: text/html; charset=utf-8\r\n\r\n$encoded_result\r\n");
+@@ -36,7 +39,7 @@ $clientCode = <<<'CODE'
+     var_dump($http_response_header);
+ CODE;
+ 
+-include sprintf("%s/../../../openssl/tests/ServerClientTestCase.inc", __DIR__);
++include sprintf("%s/ServerClientTestCase.inc", __DIR__);
+ ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
+ ?>
+ --EXPECTF--
+diff --git a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-002.phpt b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-002.phpt
+index ca8f75f0..45bb0b14 100644
+--- a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-002.phpt
++++ b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-002.phpt
+@@ -17,7 +17,10 @@ $serverCode = <<<'CODE'
+ 
+     phpt_notify(WORKER_DEFAULT_NAME, "server-accepted");
+ 
+-    $result = fread($conn, 1024);
++    $result = '';
++    while (strpos($result, "\r\n\r\n") === false && !feof($conn)) {
++        $result .= fread($conn, 1024);
++    }
+     $encoded_result = base64_encode($result);
+ 
+     fwrite($conn, "HTTP/1.0 200 Ok\r\nContent-Type: text/html; charset=utf-8\r\n\r\n$encoded_result\r\n");
+@@ -36,7 +39,7 @@ $clientCode = <<<'CODE'
+     var_dump($http_response_header);
+ CODE;
+ 
+-include sprintf("%s/../../../openssl/tests/ServerClientTestCase.inc", __DIR__);
++include sprintf("%s/ServerClientTestCase.inc", __DIR__);
+ ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
+ ?>
+ --EXPECTF--
+diff --git a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-003.phpt b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-003.phpt
+index 4cfbc7ee..5ab91b2a 100644
+--- a/ext/standard/tests/http/ghsa-hgf5-96fm-v528-003.phpt
++++ b/ext/standard/tests/http/ghsa-hgf5-96fm-v528-003.phpt
+@@ -17,7 +17,10 @@ $serverCode = <<<'CODE'
+ 
+     phpt_notify(WORKER_DEFAULT_NAME, "server-accepted");
+ 
+-    $result = fread($conn, 1024);
++    $result = '';
++    while (strpos($result, "\r\n\r\n") === false && !feof($conn)) {
++        $result .= fread($conn, 1024);
++    }
+     $encoded_result = base64_encode($result);
+ 
+     fwrite($conn, "HTTP/1.0 200 Ok\r\nContent-Type: text/html; charset=utf-8\r\n\r\n$encoded_result\r\n");
+@@ -36,7 +39,7 @@ $clientCode = <<<'CODE'
+     var_dump($http_response_header);
+ CODE;
+ 
+-include sprintf("%s/../../../openssl/tests/ServerClientTestCase.inc", __DIR__);
++include sprintf("%s/ServerClientTestCase.inc", __DIR__);
+ ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
+ ?>
+ --EXPECTF--
