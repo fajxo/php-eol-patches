@@ -129,11 +129,13 @@ class ServerClientTestCase
      *
      * @param string       $clientCode The client PHP code
      * @param string|array $workerCode
-     * @param bool         $ephemeral Select whether automatic port selection and automatic awaiting is used
+     * @param bool|null    $ephemeral Select whether automatic port selection and automatic awaiting is used;
+     *                               null: per worker, only if its code calls phpt_notify_server_start()
+     *                               (tests from before GHSA-v8xr use fixed ports and a bare phpt_notify())
      * @return void
      * @throws Exception
      */
-    public function run(string $clientCode, $workerCode, bool $ephemeral = true): void
+    public function run(string $clientCode, $workerCode, ?bool $ephemeral = null): void
     {
         if (!is_array($workerCode)) {
             $workerCode = [WORKER_DEFAULT_NAME => $workerCode];
@@ -142,9 +144,10 @@ class ServerClientTestCase
         $code = current($workerCode);
         $worker = key($workerCode);
         while ($worker != null) {
+            $workerEphemeral = $ephemeral ?? (strpos($code, 'phpt_notify_server_start') !== false);
             $this->spawnWorkerProcess($worker, $this->stripPhpTagsFromCode($code));
             $code = next($workerCode);
-            if ($ephemeral) {
+            if ($workerEphemeral) {
                 $addr = trim($this->wait($worker));
                 if (empty($addr)) {
                     throw new \Exception("Failed server start");
