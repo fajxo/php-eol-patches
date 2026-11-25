@@ -165,6 +165,7 @@ static zend_bool check_has_header(const char *headers, const char *header) {
 typedef struct _php_stream_http_response_header_info {
 	php_stream_filter *transfer_encoding;
 	size_t file_size;
+	zend_bool error;
 	int follow_location;
 	char location[HTTP_HEADER_BLOCK_SIZE];
 } php_stream_http_response_header_info;
@@ -174,6 +175,7 @@ static void php_stream_http_response_header_info_init(
 {
 	header_info->transfer_encoding = NULL;
 	header_info->file_size = 0;
+	header_info->error = 0;
 	header_info->follow_location = 1;
 	header_info->location[0] = '\0';
 }
@@ -214,8 +216,8 @@ static zend_bool php_stream_http_response_header_trim(char *http_header_line,
 /* Process folding headers of the current line and if there are none, parse last full response
  * header line. It returns true if the current line was folded into the last header line,
  * otherwise false; the last header line is then consumed (stored or freed). */
-static zend_bool php_stream_http_response_headers_parse(php_stream *stream,
-		php_stream_context *context, int options,
+static zend_bool php_stream_http_response_headers_parse(php_stream_wrapper *wrapper,
+		php_stream *stream, php_stream_context *context, int options,
 		char **last_header_line_ptr, size_t *last_header_line_length_ptr,
 		char *header_line, size_t *header_line_length,
 		int response_code, zval *response_header,
@@ -272,6 +274,19 @@ static zend_bool php_stream_http_response_headers_parse(php_stream *stream,
 	/* Find header separator position. */
 	last_header_value = memchr(last_header_line, ':', last_header_line_length);
 	if (last_header_value) {
+		/* Verify there is no space in header name */
+		char *last_header_name = last_header_line + 1;
+		while (last_header_name < last_header_value) {
+			if (*last_header_name == ' ' || *last_header_name == '\t') {
+				header_info->error = 1;
+				php_stream_wrapper_log_error(wrapper, options TSRMLS_CC,
+					"HTTP invalid response format (space in header name)!");
+				efree(last_header_line);
+				return 0;
+			}
+			++last_header_name;
+		}
+
 		last_header_value++; /* Skip ':'. */
 
 		/* Strip leading whitespace. */
@@ -280,9 +295,12 @@ static zend_bool php_stream_http_response_headers_parse(php_stream *stream,
 			last_header_value++;
 		}
 	} else {
-		/* There is no colon. Set the value to the end of the header line, which is effectively
-		 * an empty string. */
-		last_header_value = last_header_line + last_header_line_length;
+		/* There is no colon which means invalid response so error. */
+		header_info->error = 1;
+		php_stream_wrapper_log_error(wrapper, options TSRMLS_CC,
+				"HTTP invalid response format (no colon in header line)!");
+		efree(last_header_line);
+		return 0;
 	}
 
 	if (!strncasecmp(last_header_line, "Location:", sizeof("Location:")-1)) {
@@ -1020,10 +1038,17 @@ finish:
 
 			if (last_header_line != NULL) {
 				/* Parse last header line. */
-				if (php_stream_http_response_headers_parse(stream, context, options,
-						&last_header_line, &last_header_line_length, http_header_line,
-						&http_header_line_length, response_code, response_header,
-						&header_info TSRMLS_CC)) {
+				zend_bool folded = php_stream_http_response_headers_parse(wrapper, stream,
+						context, options, &last_header_line, &last_header_line_length,
+						http_header_line, &http_header_line_length, response_code,
+						response_header, &header_info TSRMLS_CC);
+				if (EXPECTED(!folded)) {
+					if (UNEXPECTED(header_info.error)) {
+						php_stream_close(stream);
+						stream = NULL;
+						goto out;
+					}
+				} else {
 					/* Folding header present so continue. */
 					continue;
 				}
@@ -1054,7 +1079,7 @@ finish:
 
 	/* If the stream was closed early, we still want to process the last line to keep BC. */
 	if (last_header_line != NULL) {
-		php_stream_http_response_headers_parse(stream, context, options,
+		php_stream_http_response_headers_parse(wrapper, stream, context, options,
 				&last_header_line, &last_header_line_length, NULL, NULL,
 				response_code, response_header, &header_info TSRMLS_CC);
 	}
