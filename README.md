@@ -38,10 +38,10 @@ still the real fix.
 the PHP2Shell fix; this only changes the default to match.
 
 The GHSA rows are the 2026-11-19 PHP security release. Advisories from that
-release that are not in the table touch code these versions do not have. For
-example, GHSA-mmf9-xm3v-hg2x (CVE-2026-127960) is in the HTTP header folding
-code that the 2025 fix for CVE-2025-1217 added, and these trees do not have
-that code.
+release that are not in the table touch code these versions do not have.
+GHSA-mmf9-xm3v-hg2x (CVE-2026-127960) is the exception: it is in the HTTP
+header folding code that the 2025 fix for CVE-2025-1217 added. It is listed
+with that fix under the 2026-11-25 fixes below, for the trees that have them.
 
 ### Older fixes (2026-11-24)
 
@@ -85,6 +85,38 @@ predictable but not cryptographically random.
 ⁴ Only the `ext/filter` half: these trees keep Gentoo's `parse_url()` fix
 for the same bug.
 ⁵ Folded into the commits of the fixes they follow.
+
+### Outbound HTTP and TLS fixes (2026-11-25)
+
+Fixes for the `http://` stream wrapper and for TLS peer verification, from the
+same Surý packages, plus the real CVE-2023-0568 fix. They matter when a site
+fetches URLs itself (`file_get_contents()`, `fopen()`, libxml, SOAP) or opens
+TLS connections. 7.4 is done; 7.2 and 5.6 follow.
+
+| Fix | 5.6.40 | 7.2.34 | 7.4.33 |
+| --- | :-: | :-: | :-: |
+| CVE-2023-0568: one-byte overrun when appending a slash to a path (`main/fopen_wrappers.c`) | pending | pending | ✔ |
+| GHSA-c5f2-jwm7-mmq2 (CVE-2024-11234): CRLF injection through `request_fulluri` | pending | pending | ✔ |
+| GHSA-v8xr-gpvj-cx9g (CVE-2025-1217): folded HTTP response headers parsed wrongly | pending | pending | ✔ ¹ |
+| GHSA-pcmh-g36c-qc44 (CVE-2025-1734): HTTP response header lines without a colon | pending | pending | ✔ |
+| GHSA-52jp-hrpf-2jff (CVE-2025-1861): redirect `Location` truncated at 1024 bytes | pending | pending | ✔ |
+| GHSA-hgf5-96fm-v528 (CVE-2025-1736): user header check accepts a name not at a line start | pending | pending | ✔ |
+| GHSA-p3x9-6h7p-cgfc (CVE-2025-1219): libxml uses the charset of the first response after a redirect | pending | pending | ✔ |
+| GHSA-3cr5-j632-f35r (CVE-2025-1220): NUL bytes in hostnames | pending | pending | ✔ |
+| GHSA-vvx9-73fr-5jjx (CVE-2026-91769): TLS name check falls back to the CN after a SAN mismatch | pending | pending | ✔ |
+| GHSA-xr7j-rvgx-xq5p (CVE-2026-91767): heap over-read in wildcard certificate name matching | pending | pending | ✔ |
+| GHSA-fpwc-w8rq-cr92 (CVE-2026-91766): credentials sent on to another origin after a redirect | pending | pending | ✔ ² |
+| GH-23467: out-of-bounds read on an empty `Location` header | pending | pending | ✔ ³ |
+| GHSA-mmf9-xm3v-hg2x (CVE-2026-127960): quadratic time on many folded header lines | pending | pending | ✔ |
+
+¹ The fix also changes the shared TLS test helper
+(`ext/openssl/tests/ServerClientTestCase.inc`) to ephemeral ports. A separate
+commit keeps the older tests that use fixed ports working with it.
+² Adapted: these trees do not have GH-11274 (keep the method on 307/308), so
+the redirect flag handling and the test expectation follow 7.4's behaviour,
+where a 307 turns a POST into a GET.
+³ The tests include the TLS helper from `ext/openssl/tests/`, where 7.4 keeps
+it.
 
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
@@ -131,7 +163,8 @@ some earlier security backports):
   Gentoo's `php-7.4.33-CVE-2023-0568.patch` is misnamed: it holds the
   `php_crypt()` short-salt over-read fix, which is part of CVE-2023-0567.
   The real CVE-2023-0568 fix (1-byte overrun in the open_basedir check,
-  `main/fopen_wrappers.c`) is not in the base of any version.
+  `main/fopen_wrappers.c`) is not in the base of any version; it is one of
+  the 2026-11-25 fixes.
 
 `patches/base/php-X.Y.Z-gentoo-base.patch` is that whole difference as one
 patch (php.net tarball → first commit of the branch). It is here because the
@@ -198,6 +231,8 @@ strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Fatal error: %s in %s on line %
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'but the signature does not use openssl'   # 1 = patched
 # 2026-11-24 fixes (GHSA-9pqp multipart boundary)
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Boundary too large'   # 1 = patched
+# 2026-11-25 fixes (GHSA-52jp Location limit)
+strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'HTTP Location header size is over the limit'   # 1 = patched
 ```
 
 Adjust the path for your system.
@@ -218,6 +253,12 @@ and the PHP test suite (`.phpt`) was run on both builds:
   GHSA-3qrf tests need the `zend_test` extension, the GHSA-cj93 test is
   marked resource-heavy, and on 5.6 the GHSA-453j test cannot build a string
   over 2 GB.
+- The tests added or changed by the 2026-11-25 fixes (7.4): 30, all PASS on
+  the patched build. 26 FAIL on the unpatched build; the other four
+  (`san_absent_cn_fallback`, `ghsa-hgf5-96fm-v528-002/-003`,
+  `http_single_char_location_redirect`) pass on both, as they guard cases
+  that were already handled. This run was the full test suite, built with
+  gcc 16.
 - No test that passed before fails after the patches. The tests that still
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,

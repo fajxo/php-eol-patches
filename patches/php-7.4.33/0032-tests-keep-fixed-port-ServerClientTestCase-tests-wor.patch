@@ -1,0 +1,55 @@
+From 749090043e6048a517faeddce0fe6d408e6af68b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 10:26:04 +0100
+Subject: [PATCH] tests: keep fixed-port ServerClientTestCase tests working
+
+The GHSA-v8xr backport brings the ServerClientTestCase.inc of newer
+branches, whose run() waits for every worker to print its address
+(phpt_notify_server_start(), ephemeral ports) and throws "Failed server
+start" otherwise. Every older test in 7.4 uses fixed ports and a bare
+phpt_notify(): 33 openssl and stream tests, our GHSA-f6gg tests and
+Sury's own 7.4 tests for vvx9/xr7j broke with it (test helper only, no
+runtime change).
+
+run() keeps upstream's signature, but $ephemeral now defaults to null:
+a worker whose code calls phpt_notify_server_start() gets the
+ephemeral handshake, any other the old one. true/false still force a
+mode.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/openssl/tests/ServerClientTestCase.inc | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/ext/openssl/tests/ServerClientTestCase.inc b/ext/openssl/tests/ServerClientTestCase.inc
+index c74da444..7e179247 100644
+--- a/ext/openssl/tests/ServerClientTestCase.inc
++++ b/ext/openssl/tests/ServerClientTestCase.inc
+@@ -129,11 +129,13 @@ class ServerClientTestCase
+      *
+      * @param string       $clientCode The client PHP code
+      * @param string|array $workerCode
+-     * @param bool         $ephemeral Select whether automatic port selection and automatic awaiting is used
++     * @param bool|null    $ephemeral Select whether automatic port selection and automatic awaiting is used;
++     *                               null: per worker, only if its code calls phpt_notify_server_start()
++     *                               (tests from before GHSA-v8xr use fixed ports and a bare phpt_notify())
+      * @return void
+      * @throws Exception
+      */
+-    public function run(string $clientCode, $workerCode, bool $ephemeral = true): void
++    public function run(string $clientCode, $workerCode, ?bool $ephemeral = null): void
+     {
+         if (!is_array($workerCode)) {
+             $workerCode = [WORKER_DEFAULT_NAME => $workerCode];
+@@ -142,9 +144,10 @@ class ServerClientTestCase
+         $code = current($workerCode);
+         $worker = key($workerCode);
+         while ($worker != null) {
++            $workerEphemeral = $ephemeral ?? (strpos($code, 'phpt_notify_server_start') !== false);
+             $this->spawnWorkerProcess($worker, $this->stripPhpTagsFromCode($code));
+             $code = next($workerCode);
+-            if ($ephemeral) {
++            if ($workerEphemeral) {
+                 $addr = trim($this->wait($worker));
+                 if (empty($addr)) {
+                     throw new \Exception("Failed server start");
