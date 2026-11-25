@@ -5584,6 +5584,17 @@ PHP_FUNCTION(openssl_encrypt)
 	free_iv = php_openssl_validate_iv(&iv, &iv_len, max_iv_len TSRMLS_CC);
 
 	outlen = data_len + EVP_CIPHER_block_size(cipher_type);
+#ifdef EVP_CIPH_WRAP_MODE
+	if ((EVP_CIPHER_mode(cipher_type)) == EVP_CIPH_WRAP_MODE) {
+		/*
+		 * RFC 5649 wrap-with-padding rounds the input up to the block size
+		 * and prepends an integrity block, we reserve one extra block.
+		 * See EVP_EncryptUpdate(3): wrap mode may write up to
+		 * inl + cipher_block_size bytes.
+		 */
+		outlen += EVP_CIPHER_block_size(cipher_type);
+	}
+#endif
 	outbuf = safe_emalloc(outlen, 1, 1);
 
 	cipher_ctx = EVP_CIPHER_CTX_new();
@@ -5687,6 +5698,17 @@ PHP_FUNCTION(openssl_decrypt)
 	free_iv = php_openssl_validate_iv(&iv, &iv_len, EVP_CIPHER_iv_length(cipher_type) TSRMLS_CC);
 
 	outlen = data_len + EVP_CIPHER_block_size(cipher_type);
+#ifdef EVP_CIPH_WRAP_MODE
+	if ((EVP_CIPHER_mode(cipher_type)) == EVP_CIPH_WRAP_MODE) {
+		/*
+		 * RFC 5649 wrap-with-padding rounds the input up to the block size
+		 * and prepends an integrity block, we reserve one extra block.
+		 * See EVP_EncryptUpdate(3): wrap mode may write up to
+		 * inl + cipher_block_size bytes.
+		 */
+		outlen += EVP_CIPHER_block_size(cipher_type);
+	}
+#endif
 	outbuf = emalloc(outlen + 1);
 
 	cipher_ctx = EVP_CIPHER_CTX_new();
