@@ -444,8 +444,31 @@ php_mysqlnd_greet_read(void * _packet)
 	if (packet->server_capabilities & CLIENT_PLUGIN_AUTH) {
 		BAIL_IF_NO_MORE_DATA;
 		/* The server is 5.5.x and supports authentication plugins */
-		packet->auth_protocol = estrdup((char *)p);
-		p+= strlen(packet->auth_protocol) + 1; /* eat the '\0' */
+		size_t remaining_size = packet->header.size - (size_t)(p - buf);
+		if (remaining_size == 0) {
+			/* Might be better to fail but this will fail anyway */
+			packet->auth_protocol = estrdup("");
+		} else {
+			/* Check if NUL present */
+			char *null_terminator = memchr(p, '\0', remaining_size);
+			size_t auth_protocol_len;
+			if (null_terminator) {
+				/* If present, do basically estrdup */
+				auth_protocol_len = null_terminator - (char *)p;
+			} else {
+				/* If not present, copy the rest of the buffer */
+				auth_protocol_len = remaining_size;
+			}
+			char *auth_protocol = emalloc(auth_protocol_len + 1);
+			memcpy(auth_protocol, p, auth_protocol_len);
+			auth_protocol[auth_protocol_len] = '\0';
+			packet->auth_protocol = auth_protocol;
+
+			p += auth_protocol_len;
+			if (null_terminator) {
+				p++;
+			}
+		}
 	}
 
 	DBG_INF_FMT("proto=%u server=%s thread_id=%u",
@@ -734,7 +757,14 @@ php_mysqlnd_auth_response_read(void * _packet)
 
 		/* There is a message */
 		if (packet->header.size > (size_t) (p - buf) && (net_len = php_mysqlnd_net_field_length(&p))) {
-			packet->message_len = MIN(net_len, buf_len - (p - begin));
+			/* p can get past packet size when getting field length so it needs to be checked first
+			 * and after that it can be checked that the net_len is not greater than the packet size */
+			if ((p - buf) > packet->header.size || packet->header.size - (p - buf) < net_len) {
+				DBG_ERR_FMT("OK packet message length is past the packet size");
+				php_error_docref(NULL, E_WARNING, "OK packet message length is past the packet size");
+				DBG_RETURN(FAIL);
+			}
+			packet->message_len = net_len;
 			packet->message = mnd_pestrndup((char *)p, packet->message_len, FALSE);
 		} else {
 			packet->message = NULL;
@@ -1170,6 +1200,17 @@ php_mysqlnd_rset_header_read(void * _packet)
 			BAIL_IF_NO_MORE_DATA;
 			/* Check for additional textual data */
 			if (packet->header.size  > (size_t) (p - buf) && (len = php_mysqlnd_net_field_length(&p))) {
+				/* p can get past packet size when getting field length so it needs to be checked first
+				 * and after that it can be checked that the len is not greater than the packet size */
+				if ((p - buf) > packet->header.size || packet->header.size - (p - buf) < len) {
+					size_t local_file_name_over_read = ((p - buf) - packet->header.size) + len;
+					DBG_ERR_FMT("RSET_HEADER packet additional data length is past %zu bytes the packet size",
+						local_file_name_over_read);
+					php_error_docref(NULL, E_WARNING,
+						"RSET_HEADER packet additional data length is past %zu bytes the packet size",
+						local_file_name_over_read);
+					DBG_RETURN(FAIL);
+				}
 				packet->info_or_local_file.s = mnd_emalloc(len + 1);
 				if (packet->info_or_local_file.s) {
 					memcpy(packet->info_or_local_file.s, p, len);
@@ -1346,27 +1387,16 @@ php_mysqlnd_rset_field_read(void * _packet)
 		meta->flags |= NUM_FLAG;
 	}
 
-
-	/*
-	  def could be empty, thus don't allocate on the root.
-	  NULL_LENGTH (0xFB) comes from COM_FIELD_LIST when the default value is NULL.
-	  Otherwise the string is length encoded.
-	*/
+	/* COM_FIELD_LIST is no longer supported so def should not be present */
 	if (packet->header.size > (size_t) (p - buf) &&
 		(len = php_mysqlnd_net_field_length(&p)) &&
 		len != MYSQLND_NULL_LENGTH)
 	{
-		BAIL_IF_NO_MORE_DATA;
-		DBG_INF_FMT("Def found, length %lu, persistent=%u", len, packet->persistent_alloc);
-		meta->def = mnd_pemalloc(len + 1, packet->persistent_alloc);
-		if (!meta->def) {
-			SET_OOM_ERROR(error_info);
-			DBG_RETURN(FAIL);
-		}
-		memcpy(meta->def, p, len);
-		meta->def[len] = '\0';
-		meta->def_length = len;
-		p += len;
+		DBG_ERR_FMT("Protocol error. Server sent default for unsupported field list");
+		php_error_docref(NULL, E_WARNING,
+			"Protocol error. Server sent default for unsupported field list (mysqlnd_wireprotocol.c:%u)",
+			__LINE__);
+		DBG_RETURN(FAIL);
 	}
 
 	root_ptr = meta->root = mnd_pemalloc(total_len, packet->persistent_alloc);
@@ -1547,8 +1577,10 @@ php_mysqlnd_rowp_read_binary_protocol(MYSQLND_MEMORY_POOL_CHUNK * row_buffer, zv
 									  unsigned int field_count, const MYSQLND_FIELD * fields_metadata,
 									  zend_bool as_int_or_float, MYSQLND_STATS * stats)
 {
-	unsigned int i;
-	const zend_uchar * p = row_buffer->ptr;
+	unsigned int i, j;
+	size_t rbs = row_buffer->app;
+	const zend_uchar * rbp = row_buffer->ptr;
+	const zend_uchar * p = rbp;
 	const zend_uchar * null_ptr;
 	zend_uchar bit;
 	zval *current_field, *end_field, *start_field;
@@ -1581,7 +1613,21 @@ php_mysqlnd_rowp_read_binary_protocol(MYSQLND_MEMORY_POOL_CHUNK * row_buffer, zv
 			statistic = STAT_BINARY_TYPE_FETCHED_NULL;
 		} else {
 			enum_mysqlnd_field_types type = fields_metadata[i].type;
-			mysqlnd_ps_fetch_functions[type].func(current_field, &fields_metadata[i], 0, &p);
+			size_t row_position = p - rbp;
+			if (rbs <= row_position) {
+				for (j = 0, current_field = start_field; j < i; current_field++, j++) {
+					zval_ptr_dtor(current_field);
+				}
+				php_error_docref(NULL, E_WARNING, "Malformed server packet. No packet space left for the field");
+				DBG_RETURN(FAIL);
+			}
+			mysqlnd_ps_fetch_functions[type].func(current_field, &fields_metadata[i], rbs - row_position, &p);
+			if (p == NULL) {
+				for (j = 0, current_field = start_field; j < i; current_field++, j++) {
+					zval_ptr_dtor(current_field);
+				}
+				DBG_RETURN(FAIL);
+			}
 
 			if (MYSQLND_G(collect_statistics)) {
 				switch (fields_metadata[i].type) {
@@ -1638,7 +1684,7 @@ php_mysqlnd_rowp_read_text_protocol_aux(MYSQLND_MEMORY_POOL_CHUNK * row_buffer, 
 									unsigned int field_count, const MYSQLND_FIELD * fields_metadata,
 									zend_bool as_int_or_float, MYSQLND_STATS * stats)
 {
-	unsigned int i;
+	unsigned int i, j;
 	zval *current_field, *end_field, *start_field;
 	zend_uchar * p = row_buffer->ptr;
 	size_t data_size = row_buffer->app;
@@ -1659,9 +1705,11 @@ php_mysqlnd_rowp_read_text_protocol_aux(MYSQLND_MEMORY_POOL_CHUNK * row_buffer, 
 		/* NULL or NOT NULL, this is the question! */
 		if (len == MYSQLND_NULL_LENGTH) {
 			ZVAL_NULL(current_field);
-		} else if ((p + len) > packet_end) {
-			php_error_docref(NULL, E_WARNING, "Malformed server packet. Field length pointing "MYSQLND_SZ_T_SPEC
-											  " bytes after end of packet", (p + len) - packet_end - 1);
+		} else if (p > packet_end || len > packet_end - p) {
+			php_error_docref(NULL, E_WARNING, "Malformed server packet. Field length pointing after end of packet");
+			for (j = 0, current_field = start_field; j < i; current_field++, j++) {
+				zval_ptr_dtor(current_field);
+			}
 			DBG_RETURN(FAIL);
 		} else {
 #if defined(MYSQLND_STRING_TO_INT_CONVERSION)
