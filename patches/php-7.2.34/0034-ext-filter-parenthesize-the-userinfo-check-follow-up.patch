@@ -1,0 +1,32 @@
+From 272f5b655e714f83388c7c5054b1aa23a8afeeb5 Mon Sep 17 00:00:00 2001
+From: Stanislav Malyshev <stas@php.net>
+Date: Tue, 24 Nov 2026 20:09:43 +0100
+Subject: [PATCH] ext/filter: parenthesize the userinfo check (follow-up to
+ CVE-2021-21705)
+
+No change in behaviour (&& binds tighter than ||); silences
+-Wparentheses in the FILTER_VALIDATE_URL userinfo check.
+
+Backport of php-src 190013787b (Stanislav Malyshev), same change as
+Sury's 7.2 patch 0069; part of fajxo/issue-tracking#205 batch A+B.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/filter/logical_filters.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ext/filter/logical_filters.c b/ext/filter/logical_filters.c
+index e3cc7b09..f91aa12d 100644
+--- a/ext/filter/logical_filters.c
++++ b/ext/filter/logical_filters.c
+@@ -592,8 +592,8 @@ bad_url:
+ 		RETURN_VALIDATION_FAILED
+ 	}
+ 
+-	if (url->user != NULL && !is_userinfo_valid(url->user)
+-		|| url->pass != NULL && !is_userinfo_valid(url->pass)
++	if ((url->user != NULL && !is_userinfo_valid(url->user))
++		|| (url->pass != NULL && !is_userinfo_valid(url->pass))
+ 	) {
+ 		php_url_free(url);
+ 		RETURN_VALIDATION_FAILED

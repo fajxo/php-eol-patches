@@ -1,0 +1,32 @@
+From 74c8f703a93ebbbd219821f10e69d1c540cc052c Mon Sep 17 00:00:00 2001
+From: Nikita Popov <nikita.ppv@gmail.com>
+Date: Tue, 24 Nov 2026 20:09:42 +0100
+Subject: [PATCH] ext/soap: SAFE_STR casts to const char * (follow-up to
+ CVE-2021-21702)
+
+The CVE-2021-21702 backport added SAFE_STR(a) ((a)?a:""). With an
+xmlChar * argument the two branches have different pointer types, which
+newer gcc rejects (an error without -fpermissive). The upstream build fix
+casts the pointer.
+
+Backport of php-src e5d767d27f (Nikita Popov), same change as Sury's 7.2
+patch 0060; part of fajxo/issue-tracking#205 batch A+B.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/soap/php_sdl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ext/soap/php_sdl.c b/ext/soap/php_sdl.c
+index b8d40f0c..522db1c9 100644
+--- a/ext/soap/php_sdl.c
++++ b/ext/soap/php_sdl.c
+@@ -314,7 +314,7 @@ void sdl_restore_uri_credentials(sdlCtx *ctx)
+ 	ctx->context = NULL;
+ }
+ 
+-#define SAFE_STR(a) ((a)?a:"")
++#define SAFE_STR(a) ((a)?((const char *)a):"")
+ 
+ static void load_wsdl_ex(zval *this_ptr, char *struri, sdlCtx *ctx, int include)
+ {

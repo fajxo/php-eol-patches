@@ -76,6 +76,7 @@ upstream php-src fix; the commit messages name it and Surý's patch.
 | GHSA-rgrp-mwpx-f6rm: unbounded recursion in SOAP XML parsing and decoding | ✔ | ✔ | ✔ |
 | GHSA-cj93-vc83-wgqv (CVE-2025-14181): SoapClient chunked response length overflow | ✔ | ✔ | ✔ |
 | SOAP: a DOCTYPE named like the root element was matched as an element (regression of the GHSA-4646 fix) | ✔ | ✔ | ✔ |
+| Follow-ups to CVE-2021-21702 and CVE-2021-21705: `SAFE_STR` cast to `const char *` (php-src e5d767d27f, a build error on gcc 16) and parentheses in the `FILTER_VALIDATE_URL` userinfo check (190013787b) | ✔ ⁵ | ✔ | – ¹ |
 
 ¹ Already fixed in that release.
 ² The code is not in 5.6.
@@ -83,6 +84,7 @@ upstream php-src fix; the commit messages name it and Surý's patch.
 predictable but not cryptographically random.
 ⁴ Only the `ext/filter` half: these trees keep Gentoo's `parse_url()` fix
 for the same bug.
+⁵ Folded into the commits of the fixes they follow.
 
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
