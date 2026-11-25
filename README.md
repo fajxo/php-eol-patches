@@ -91,32 +91,40 @@ for the same bug.
 Fixes for the `http://` stream wrapper and for TLS peer verification, from the
 same Surý packages, plus the real CVE-2023-0568 fix. They matter when a site
 fetches URLs itself (`file_get_contents()`, `fopen()`, libxml, SOAP) or opens
-TLS connections. 7.4 is done; 7.2 and 5.6 follow.
+TLS connections. 7.4 and 7.2 are done; 5.6 follows.
 
 | Fix | 5.6.40 | 7.2.34 | 7.4.33 |
 | --- | :-: | :-: | :-: |
-| CVE-2023-0568: one-byte overrun when appending a slash to a path (`main/fopen_wrappers.c`) | pending | pending | ✔ |
-| GHSA-c5f2-jwm7-mmq2 (CVE-2024-11234): CRLF injection through `request_fulluri` | pending | pending | ✔ |
-| GHSA-v8xr-gpvj-cx9g (CVE-2025-1217): folded HTTP response headers parsed wrongly | pending | pending | ✔ ¹ |
-| GHSA-pcmh-g36c-qc44 (CVE-2025-1734): HTTP response header lines without a colon | pending | pending | ✔ |
-| GHSA-52jp-hrpf-2jff (CVE-2025-1861): redirect `Location` truncated at 1024 bytes | pending | pending | ✔ |
-| GHSA-hgf5-96fm-v528 (CVE-2025-1736): user header check accepts a name not at a line start | pending | pending | ✔ |
-| GHSA-p3x9-6h7p-cgfc (CVE-2025-1219): libxml uses the charset of the first response after a redirect | pending | pending | ✔ |
-| GHSA-3cr5-j632-f35r (CVE-2025-1220): NUL bytes in hostnames | pending | pending | ✔ |
-| GHSA-vvx9-73fr-5jjx (CVE-2026-91769): TLS name check falls back to the CN after a SAN mismatch | pending | pending | ✔ |
-| GHSA-xr7j-rvgx-xq5p (CVE-2026-91767): heap over-read in wildcard certificate name matching | pending | pending | ✔ |
-| GHSA-fpwc-w8rq-cr92 (CVE-2026-91766): credentials sent on to another origin after a redirect | pending | pending | ✔ ² |
-| GH-23467: out-of-bounds read on an empty `Location` header | pending | pending | ✔ ³ |
-| GHSA-mmf9-xm3v-hg2x (CVE-2026-127960): quadratic time on many folded header lines | pending | pending | ✔ |
+| CVE-2023-0568: one-byte overrun when appending a slash to a path (`main/fopen_wrappers.c`) | pending | ✔ | ✔ |
+| GHSA-c5f2-jwm7-mmq2 (CVE-2024-11234): CRLF injection through `request_fulluri` | pending | ✔ | ✔ |
+| GHSA-v8xr-gpvj-cx9g (CVE-2025-1217): folded HTTP response headers parsed wrongly | pending | ✔ | ✔ ¹ |
+| GHSA-pcmh-g36c-qc44 (CVE-2025-1734): HTTP response header lines without a colon | pending | ✔ | ✔ |
+| GHSA-52jp-hrpf-2jff (CVE-2025-1861): redirect `Location` truncated at 1024 bytes | pending | ✔ | ✔ |
+| GHSA-hgf5-96fm-v528 (CVE-2025-1736): user header check accepts a name not at a line start | pending | ✔ | ✔ |
+| GHSA-p3x9-6h7p-cgfc (CVE-2025-1219): libxml uses the charset of the first response after a redirect | pending | – ⁴ | ✔ |
+| GHSA-3cr5-j632-f35r (CVE-2025-1220): NUL bytes in hostnames | pending | ✔ | ✔ |
+| GHSA-vvx9-73fr-5jjx (CVE-2026-91769): TLS name check falls back to the CN after a SAN mismatch | pending | ✔ ⁵ | ✔ |
+| GHSA-xr7j-rvgx-xq5p (CVE-2026-91767): heap over-read in wildcard certificate name matching | pending | ✔ | ✔ |
+| GHSA-fpwc-w8rq-cr92 (CVE-2026-91766): credentials sent on to another origin after a redirect | pending | ✔ ² | ✔ ² |
+| GH-23467: out-of-bounds read on an empty `Location` header | pending | ✔ | ✔ ³ |
+| GHSA-mmf9-xm3v-hg2x (CVE-2026-127960): quadratic time on many folded header lines | pending | ✔ | ✔ |
+| Bug #78719: long response header lines silently dropped (needed by the fixes above) | pending | ✔ | – ⁶ |
+| Bug #79265: user `Host:` and other headers checked only at their first match, so a second Host was added | pending | ✔ | – ⁶ |
 
 ¹ The fix also changes the shared TLS test helper
 (`ext/openssl/tests/ServerClientTestCase.inc`) to ephemeral ports. A separate
 commit keeps the older tests that use fixed ports working with it.
 ² Adapted: these trees do not have GH-11274 (keep the method on 307/308), so
-the redirect flag handling and the test expectation follow 7.4's behaviour,
-where a 307 turns a POST into a GET.
-³ The tests include the TLS helper from `ext/openssl/tests/`, where 7.4 keeps
-it.
+the redirect flag handling and the test expectation follow these releases'
+behaviour, where a 307 turns a POST into a GET.
+³ On 7.4 the tests include the TLS helper from `ext/openssl/tests/`, where
+7.4 keeps it.
+⁴ 7.2 does not take the charset from the response headers at all, so the
+code this fixes is not there.
+⁵ With the newer openssl test certificate generator (SAN support, SHA-256)
+the tests need. 7.2 keeps its own TLS test helper for the older tests; the
+new http tests use a copy of 7.4's in `ext/standard/tests/http/`.
+⁶ Already fixed in that release.
 
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
@@ -231,7 +239,7 @@ strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Fatal error: %s in %s on line %
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'but the signature does not use openssl'   # 1 = patched
 # 2026-11-24 fixes (GHSA-9pqp multipart boundary)
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Boundary too large'   # 1 = patched
-# 2026-11-25 fixes (GHSA-52jp Location limit)
+# 2026-11-25 fixes (GHSA-52jp Location limit; 7.4, 7.2)
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'HTTP Location header size is over the limit'   # 1 = patched
 ```
 
@@ -259,6 +267,10 @@ and the PHP test suite (`.phpt`) was run on both builds:
   `http_single_char_location_redirect`) pass on both, as they guard cases
   that were already handled. This run was the full test suite, built with
   gcc 16.
+- On 7.2 (full suite, gcc 16): 32 added or changed tests, all PASS on the
+  patched build, 26 FAIL on the unpatched one. 14 older openssl tests pass
+  now as well: the test certificate generator signs with SHA-256, which
+  current OpenSSL accepts. FAIL 125 -> 111.
 - No test that passed before fails after the patches. The tests that still
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,
