@@ -1,0 +1,72 @@
+From 5c75bf9c2c8e0a980c4a9e069fc3f7a93b7df588 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 18:34:20 +0100
+Subject: [PATCH] mysqlnd: reject OK messages past the packet body
+
+The OK packet reader took the message length from the packet and
+copied that many bytes even when it pointed past the packet body.
+Reject such packets. Follow-up of the h35g/r6x9 fixes.
+
+Sury's 7.2 patch 0218 (Ondrej Sury), with its fake-server test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/mysqli/tests/fake_server.inc              | 15 +++++++++++++
+ .../tests/mysqlnd-ok-message-past-packet.phpt | 22 +++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+ create mode 100644 ext/mysqli/tests/mysqlnd-ok-message-past-packet.phpt
+
+diff --git a/ext/mysqli/tests/fake_server.inc b/ext/mysqli/tests/fake_server.inc
+index db04a041..334a0fb6 100644
+--- a/ext/mysqli/tests/fake_server.inc
++++ b/ext/mysqli/tests/fake_server.inc
+@@ -711,6 +711,21 @@ function my_mysqli_test_stmt_response_row_over_read_string(my_mysqli_fake_server
+     $conn->read(65536);
+ }
+ 
++function my_mysqli_test_ok_message_length_past_packet(my_mysqli_fake_server_conn $conn)
++{
++    $p = $conn->packet_generator->server_ok();
++    $p->packet_number = '01';
++    $p->packet_length = '080000';
++    $p->message_len = '10';
++
++    $conn->send_server_greetings();
++    $conn->read();
++    $conn->send_server_ok();
++    $conn->read();
++    $conn->send($p->to_bytes(), 'OK message length past packet');
++    $conn->read();
++}
++
+ function my_mysqli_test_stmt_response_row_short_length(my_mysqli_fake_server_conn $conn, $field_name)
+ {
+     $rh = $conn->packet_generator->server_stmt_execute_data_response($field_name);
+diff --git a/ext/mysqli/tests/mysqlnd-ok-message-past-packet.phpt b/ext/mysqli/tests/mysqlnd-ok-message-past-packet.phpt
+new file mode 100644
+index 00000000..b0a0158e
+--- /dev/null
++++ b/ext/mysqli/tests/mysqlnd-ok-message-past-packet.phpt
+@@ -0,0 +1,22 @@
++--TEST--
++mysqlnd rejects an OK message whose length exceeds the packet body
++--EXTENSIONS--
++mysqli
++--FILE--
++<?php
++require_once 'fake_server.inc';
++$port = 33305;
++$process = run_fake_server_in_background('ok_message_length_past_packet', $port);
++$process->wait();
++try {
++    $conn = new mysqli('127.0.0.1', 'root', '', '', $port);
++    var_dump($conn->select_db('php_test'));
++    $conn->close();
++} catch (Exception $e) {
++    echo $e->getMessage(), "\n";
++}
++$process->terminate(true);
++echo "done\n";
++?>
++--EXPECTREGEX--
++(?s).*Premature end of data.*done

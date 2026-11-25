@@ -1,0 +1,67 @@
+From 5dd87a32f6a13b67a713452c2b6791598cee1ee6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 18:34:14 +0100
+Subject: [PATCH] Fix bug #79589: ssl3_read_n unexpected EOF with OpenSSL 3
+
+OpenSSL 3 reports a peer that closes the TLS connection without
+close_notify as an error ("unexpected eof while reading"). Many servers
+do that, so PHP streams over TLS (file_get_contents('https://...'),
+SoapClient, ftp_ssl) failed on the last read on our OpenSSL. Set
+SSL_OP_IGNORE_UNEXPECTED_EOF when OpenSSL has it, as later PHP releases
+do.
+
+Not a security fix: it restores the OpenSSL 1.1 behaviour these trees
+were written for.
+
+Backport of php-src GH-8369 (Jakub Zelenka), Sury's 7.2 patch 0091.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/openssl/tests/bug79589.phpt | 21 +++++++++++++++++++++
+ ext/openssl/xp_ssl.c            |  5 +++++
+ 2 files changed, 26 insertions(+)
+ create mode 100644 ext/openssl/tests/bug79589.phpt
+
+diff --git a/ext/openssl/tests/bug79589.phpt b/ext/openssl/tests/bug79589.phpt
+new file mode 100644
+index 00000000..5d277e8c
+--- /dev/null
++++ b/ext/openssl/tests/bug79589.phpt
+@@ -0,0 +1,21 @@
++--TEST--
++Bug #65538: TLS unexpected EOF failure
++--EXTENSIONS--
++openssl
++--SKIPIF--
++<?php
++if (getenv("SKIP_ONLINE_TESTS")) die("skip online test");
++?>
++--FILE--
++<?php
++
++$release = file_get_contents(
++    'https://chromedriver.storage.googleapis.com/LATEST_RELEASE',
++    false,
++    stream_context_create(['ssl' => ['verify_peer'=> false]])
++);
++echo gettype($release);
++
++?>
++--EXPECT--
++string
+diff --git a/ext/openssl/xp_ssl.c b/ext/openssl/xp_ssl.c
+index 2838b62c..ab927816 100644
+--- a/ext/openssl/xp_ssl.c
++++ b/ext/openssl/xp_ssl.c
+@@ -1678,6 +1678,11 @@ int php_openssl_setup_crypto(php_stream *stream,
+ 
+ 	ssl_ctx_options &= ~SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS;
+ 
++#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
++	/* Only for OpenSSL 3+ to keep OpenSSL 1.1.1 behavior */
++	ssl_ctx_options |= SSL_OP_IGNORE_UNEXPECTED_EOF;
++#endif
++
+ 	if (!GET_VER_OPT("disable_compression") || zend_is_true(val)) {
+ 		ssl_ctx_options |= SSL_OP_NO_COMPRESSION;
+ 	}

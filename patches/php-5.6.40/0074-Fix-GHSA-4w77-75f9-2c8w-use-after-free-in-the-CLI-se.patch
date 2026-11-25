@@ -1,0 +1,81 @@
+From 687c48832c1fc2b4b94d52897d3d4eca7651dfac Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 18:34:25 +0100
+Subject: [PATCH] Fix GHSA-4w77-75f9-2c8w: use after free in the CLI server
+ POST reader
+
+The built-in web server (php -S) set request_info->content_type only
+when the request had a Content-Type header, so a request without one
+kept the pointer from the previous request, already freed, and
+sapi_read_post_data() read it. We do not run php -S;
+fixed for completeness.
+
+Backport of php-src 7dd336ae83 (Niels Dossche), Sury's 5.6 patch 0238.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sapi/cli/php_cli_server.c               |  2 ++
+ sapi/cli/tests/ghsa-4w77-75f9-2c8w.phpt | 41 +++++++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+ create mode 100644 sapi/cli/tests/ghsa-4w77-75f9-2c8w.phpt
+
+diff --git a/sapi/cli/php_cli_server.c b/sapi/cli/php_cli_server.c
+index 82bd573b..68c123e9 100644
+--- a/sapi/cli/php_cli_server.c
++++ b/sapi/cli/php_cli_server.c
+@@ -1873,6 +1873,8 @@ static void php_cli_server_client_populate_request_info(const php_cli_server_cli
+ 	request_info->auth_user = request_info->auth_password = request_info->auth_digest = NULL;
+ 	if (SUCCESS == zend_hash_find(&client->request.headers, "content-type", sizeof("content-type"), (void**)&val)) {
+ 		request_info->content_type = *val;
++	} else {
++		request_info->content_type = NULL;
+ 	}
+ } /* }}} */
+ 
+diff --git a/sapi/cli/tests/ghsa-4w77-75f9-2c8w.phpt b/sapi/cli/tests/ghsa-4w77-75f9-2c8w.phpt
+new file mode 100644
+index 00000000..44667e83
+--- /dev/null
++++ b/sapi/cli/tests/ghsa-4w77-75f9-2c8w.phpt
+@@ -0,0 +1,41 @@
++--TEST--
++GHSA-4w77-75f9-2c8w (Heap-Use-After-Free in sapi_read_post_data Processing in CLI SAPI Interface)
++--INI--
++allow_url_fopen=1
++--SKIPIF--
++<?php
++include "skipif.inc";
++?>
++--FILE--
++<?php
++include "php_cli_server.inc";
++
++$serverCode = <<<'CODE'
++var_dump(file_get_contents('php://input'));
++CODE;
++
++php_cli_server_start($serverCode, null);
++
++$options = [
++    "http" => [
++        "method" => "POST",
++        "header" => "Content-Type: application/x-www-form-urlencoded",
++        "content" => "AAAAA",
++    ],
++];
++$context = stream_context_create($options);
++
++echo file_get_contents("http://" . PHP_CLI_SERVER_ADDRESS . "/", false, $context);
++
++$options = [
++    "http" => [
++        "method" => "POST",
++    ],
++];
++$context = stream_context_create($options);
++
++echo file_get_contents("http://" . PHP_CLI_SERVER_ADDRESS . "/", false, $context);
++?>
++--EXPECT--
++string(5) "AAAAA"
++string(0) ""

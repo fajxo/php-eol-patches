@@ -131,6 +131,66 @@ no generator at all and gets the same one.
 headers literally, the GHSA-v8xr commit also brings the 7.x header matching
 (bug #47021).
 
+### Remaining Surý backports (2026-11-25b)
+
+The rest of the fixes in Surý's EOL packages that these trees lacked, apart
+from Windows-only ones (e.g. bug #78862) and Debian packaging changes. Most
+are php-src fixes from later 7.x releases that never reached these versions.
+
+| Fix | 5.6.40 | 7.2.34 | 7.4.33 |
+| --- | :-: | :-: | :-: |
+| GHSA-jqcx-ccgc-xwhv (CVE-2023-3824): buffer overflow in `phar_dir_read()` | ✔ | ✔ | ✔ |
+| GHSA-j3wh-g957-2m85 (CVE-2026-6103): phar tar entry injection | ✔ | ✔ | ✔ |
+| GHSA-vc5h-9ppw-p5f3 (CVE-2026-7260): crash on a circular phar symlink | ✔ | ✔ | ✔ |
+| Bug #81211: symlinks followed when creating a phar | ✔ | ✔ | – ¹ |
+| Bug #81726 (CVE-2022-31628): phar wrapper DoS with a quine gzip file | ✔ | ✔ | – ¹ |
+| Bug #79797 (CVE-2020-7068): phar zip parser uses a freed hash key | ✔ | – ¹ | – ¹ |
+| Bug #79082 (CVE-2020-7063): `Phar::buildFromIterator()` adds tar entries as 0777 | ✔ | – ¹ | – ¹ |
+| GHSA-h35g-vwh6-m678 (CVE-2024-8929): mysqlnd heap over-reads from a hostile server | ✔ | ✔ | ✔ |
+| GHSA-r6x9-5r99-36j7 (CVE-2025-1218): mysqlnd packet over-reads | ✔ ³ | ✔ ⁴ | ✔ ⁴ |
+| mysqlnd: OK packet message length past the packet body | ✔ | ✔ | ✔ |
+| Bug #81719 (CVE-2022-31626): mysqlnd/pdo password buffer overflow | ✔ | ✔ | – ¹ |
+| Bug #81740 (CVE-2022-31631): `PDO::quote()` may return an unquoted string (sqlite) | ✔ | ✔ | – ⁵ |
+| CVE-2023-0567: bcrypt hashes with a `$` in the salt | ✔ | ✔ | – ⁵ |
+| GHSA-www2-q4fc-65wf: NUL bytes in `dns_get_record()`, `ip2long()` and other network functions | ✔ ⁶ | ✔ ⁶ | ✔ |
+| Bug #79971 (CVE-2021-21707): NUL bytes in URIs given to libxml functions | ✔ | ✔ | – ¹ |
+| Bug #78863 (CVE-2019-11045): `DirectoryIterator` cuts the path at a NUL byte | ✔ | – ¹ | – ¹ |
+| Bug #79329 (CVE-2020-7066): `get_headers()` cuts the URL at a NUL byte | ✔ | – ¹ | – ¹ |
+| Bug #79330: `shell_exec()` and friends cut the command at a NUL byte | ✔ | – ¹ | – ¹ |
+| Bug #79877: `getimagesize()` cuts the path at a NUL byte | ✔ | – ¹ | – ¹ |
+| GHSA-r977-prxv-hc43 (CVE-2024-11233): over-read in `convert.quoted-printable-decode` | ✔ | ✔ | ✔ |
+| GHSA-88hq-2827-7pg6 (CVE-2026-92842): convert filter `line-break-chars` with a NUL byte | ✔ | ✔ | ✔ |
+| GHSA-4w77-75f9-2c8w: use after free in the CLI server POST reader | ✔ | ✔ | ✔ |
+| GHSA-62xp-839h-2637 (CVE-2026-91768): FastCGI `allowed_clients` with IPv6 and IPv4-mapped addresses | ✔ | ✔ | ✔ |
+| GHSA-865w-9rf3-2wh5 (CVE-2024-9026): FPM worker output log forging | – ² | – ² | ✔ |
+| GH-22187: `openssl_encrypt()` heap overflow with AES-WRAP-PAD | ✔ | ✔ | ✔ |
+| GHSA-wg4p-4hqh-c3g9: out-of-bounds read with `XML_OPTION_SKIP_TAGSTART` | – ⁷ | ✔ | ✔ |
+| GHSA-h96m-rvf9-jgm2 (CVE-2025-14178): `array_merge()` size overflow | test ⁷ | ✔ | ✔ |
+| GHSA-96wq-48vp-hh57 (CVE-2026-7568): `metaphone()` offset overflow | – ⁸ | ✔ | ✔ |
+| Bug #81738 (CVE-2022-37454): SHA-3 overflow on inputs of 4 GB or more | – ² | ✔ | – ¹ |
+| Bug #78878 (CVE-2019-11046): bcmath buffer underflow | ✔ | – ¹ | – ¹ |
+| Bug #79037 (CVE-2020-7060): mbstring big5 over-read | ✔ | – ¹ | – ¹ |
+| Bug #79221 (CVE-2020-7062): NULL dereference in session upload progress | ✔ | – ¹ | – ¹ |
+| Bug #78804: `Locale::filterMatches()` crash | ✔ | – ¹ | – ¹ |
+| Bug #81739 (CVE-2022-31630): `imageloadfont()` out-of-bounds read | test ⁷ | test ⁷ | – ¹ |
+| SOAP: a `SoapFault` from `__call()` cannot be caught when built with GCC 14 or later | ✔ | ✔ | – ¹ |
+| Bug #79589: TLS streams fail with "unexpected eof" on OpenSSL 3 (not a security fix) | ✔ | ✔ | ✔ |
+| http wrapper: two request-scoped leaks (dechunk filter, repeated `Location`) | – ⁹ | ✔ | ✔ |
+
+¹ Already fixed in that release.
+² The code is not in that version.
+³ Only the part Surý carries for 5.6: the binary row decoders for DATE,
+TIME and DATETIME.
+⁴ Upstream calls its fix partial; the tests expect warnings, not exceptions.
+⁵ In the Gentoo base patches the 7.4 branch starts from (see below), not in
+the plain php.net tarball.
+⁶ The wrong-type warnings of these functions now say "expects parameter N to
+be a valid path" instead of "to be string", as upstream does since the fix.
+⁷ Not affected: the commit adds the upstream test so that stays proven.
+⁸ 5.6 string lengths are an `int`, so no string over 2 GB can exist.
+⁹ Our own fix (upstream has the same code). Our 5.6 port of the 2026-11-25
+fixes already frees both.
+
 Each commit message explains the fix, how it differs from the upstream one, and
 how it was tested.
 
@@ -206,12 +266,20 @@ For 5.6 the ebuild has to call `eapply_user` **after** it applies the
 | Version | Fixes on the plain tarball | Fixes on tarball + Gentoo base |
 | --- | --- | --- |
 | 7.4.33 | applies, no fuzz | applies, no fuzz |
-| 7.2.34 | applies, no fuzz | applies, no fuzz |
-| 5.6.40 | **1 OpenSSL hunk fails** (it needs the backport set) | applies, no fuzz |
+| 7.2.34 | applies, no fuzz, except one test-file rename ¹ | applies, no fuzz |
+| 5.6.40 | **3 OpenSSL hunks fail** (they need the backport set) | applies, no fuzz |
+
+¹ `ext/standard/tests/url/bug77423.phpt` comes from Gentoo's
+`php-7.2.34-77423.patch`, so the tarball does not have it to move. Only that
+test is missing; the code applies.
+
+Checked with GNU patch 2.8.1 (`patch -p1 -F0`). BSD/macOS `patch` does not
+apply the renames and deletions in these patches.
 
 So for 7.2 and 7.4 the fix patch can be used directly on the tarball, or on
 top of your distribution's own patches if they do not touch the same lines.
-For 5.6 apply the base first:
+On 7.4 the tarball then lacks the two fixes Gentoo's base adds (footnote ⁵
+of the 2026-11-25b table). For 5.6 apply the base first:
 
 ```sh
 tar xf php-5.6.40.tar.xz && cd php-5.6.40
@@ -222,8 +290,9 @@ patch -p1 < ../php-eol-patches/patches/php-5.6.40.patch
 
 Applying the base and then the fixes to the php.net tarball gives the same
 files as the branch head. This was checked file by file for all three
-versions. The only difference is in four 5.6 files: their `$Id: <hash> $`
-keyword lines, which git's `ident` attribute rewrites on checkout.
+versions. The only differences are the `$Id: <hash> $` keyword lines of a
+few files the fixes change (e.g. `ext/phar/phar.c`), which git's `ident`
+attribute rewrites on checkout.
 
 ### Building straight from a branch
 
@@ -246,6 +315,8 @@ strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'but the signature does not use 
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'Boundary too large'   # 1 = patched
 # 2026-11-25 fixes (GHSA-52jp Location limit; 5.6, 7.2, 7.4)
 strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'HTTP Location header size is over the limit'   # 1 = patched
+# 2026-11-25b fixes (GHSA-j3wh phar tar; 5.6, 7.2, 7.4; needs phar built in)
+strings /usr/lib64/php7.4/bin/php-fpm | grep -c 'unsupported GNU long link entry'   # 1 = patched
 ```
 
 Adjust the path for your system.
@@ -278,6 +349,16 @@ and the PHP test suite (`.phpt`) was run on both builds:
   current OpenSSL accepts. FAIL 125 -> 111.
 - On 5.6 (full suite, gcc 16): 32 added or changed tests, all PASS on the
   patched build, 26 FAIL on the unpatched one. FAIL 156 -> 153.
+- The 2026-11-25b fixes (gcc 16): a full-suite run of each version, then,
+  after test-only adjustments (the 5.6 and 7.2 warning and exception formats,
+  the FPM test harness of 7.x), a rerun of every suite whose tests changed
+  together with all added tests. Added or changed tests that FAIL on the
+  unpatched build and PASS on the patched one: 59 on 7.4, 41 on 7.2, 44 on
+  5.6. Another 12, 7 and 10 pass on both builds, as they guard cases that
+  were already handled (or, marked "test" above, a version that is not
+  affected). The rest skip: the mysqli tests that need a MySQL server, the
+  `bug79589` test that needs the internet, and the resource-heavy GHSA-96wq
+  test.
 - No test that passed before fails after the patches. The tests that still
   fail are the same ones that fail on the unpatched build.
 - The OpenSSL 4 change was built and tested against OpenSSL 4.1.0 and 3.6.5,

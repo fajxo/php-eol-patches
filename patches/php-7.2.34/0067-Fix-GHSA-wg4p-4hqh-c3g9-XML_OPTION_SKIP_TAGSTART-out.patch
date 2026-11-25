@@ -1,0 +1,98 @@
+From 9e4ca27ea44a01de5c8bc28cbc898109da4810f2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 18:34:18 +0100
+Subject: [PATCH] Fix GHSA-wg4p-4hqh-c3g9: XML_OPTION_SKIP_TAGSTART
+ out-of-bounds read
+
+xml_parser_set_option(XML_OPTION_SKIP_TAGSTART) with a value larger
+than a tag name made the parser read past the name.
+
+Backport of php-src 0e715e71d9 (Niels Dossche), Sury's 7.2 patch 0183.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/xml/tests/toffset_bounds.phpt | 42 +++++++++++++++++++++++++++++++
+ ext/xml/xml.c                     | 12 ++++++---
+ 2 files changed, 50 insertions(+), 4 deletions(-)
+ create mode 100644 ext/xml/tests/toffset_bounds.phpt
+
+diff --git a/ext/xml/tests/toffset_bounds.phpt b/ext/xml/tests/toffset_bounds.phpt
+new file mode 100644
+index 00000000..5a3fd22f
+--- /dev/null
++++ b/ext/xml/tests/toffset_bounds.phpt
+@@ -0,0 +1,42 @@
++--TEST--
++XML_OPTION_SKIP_TAGSTART bounds
++--EXTENSIONS--
++xml
++--FILE--
++<?php
++$sample = "<?xml version=\"1.0\"?><test><child/></test>";
++$parser = xml_parser_create();
++xml_parser_set_option($parser, XML_OPTION_SKIP_TAGSTART, 100);
++$res = xml_parse_into_struct($parser,$sample,$vals,$index);
++var_dump($vals);
++?>
++--EXPECT--
++array(3) {
++  [0]=>
++  array(3) {
++    ["tag"]=>
++    string(0) ""
++    ["type"]=>
++    string(4) "open"
++    ["level"]=>
++    int(1)
++  }
++  [1]=>
++  array(3) {
++    ["tag"]=>
++    string(0) ""
++    ["type"]=>
++    string(8) "complete"
++    ["level"]=>
++    int(2)
++  }
++  [2]=>
++  array(3) {
++    ["tag"]=>
++    string(0) ""
++    ["type"]=>
++    string(5) "close"
++    ["level"]=>
++    int(1)
++  }
++}
+diff --git a/ext/xml/xml.c b/ext/xml/xml.c
+index 588d0087..fd981c6f 100644
+--- a/ext/xml/xml.c
++++ b/ext/xml/xml.c
+@@ -750,9 +750,11 @@ void _xml_startElementHandler(void *userData, const XML_Char *name, const XML_Ch
+ 				array_init(&tag);
+ 				array_init(&atr);
+ 
+-				_xml_add_to_info(parser, ZSTR_VAL(tag_name) + parser->toffset);
++				char *skipped_tag_name = SKIP_TAGSTART(ZSTR_VAL(tag_name));
+ 
+-				add_assoc_string(&tag, "tag", SKIP_TAGSTART(ZSTR_VAL(tag_name))); /* cast to avoid gcc-warning */
++				_xml_add_to_info(parser, skipped_tag_name);
++
++				add_assoc_string(&tag, "tag", skipped_tag_name);
+ 				add_assoc_string(&tag, "type", "open");
+ 				add_assoc_long(&tag, "level", parser->level);
+ 
+@@ -820,9 +822,11 @@ void _xml_endElementHandler(void *userData, const XML_Char *name)
+ 			} else {
+ 				array_init(&tag);
+ 
+-				_xml_add_to_info(parser, ZSTR_VAL(tag_name) + parser->toffset);
++				char *skipped_tag_name = SKIP_TAGSTART(ZSTR_VAL(tag_name));
++
++				_xml_add_to_info(parser, skipped_tag_name);
+ 
+-				add_assoc_string(&tag, "tag", SKIP_TAGSTART(ZSTR_VAL(tag_name))); /* cast to avoid gcc-warning */
++				add_assoc_string(&tag, "tag", skipped_tag_name);
+ 				add_assoc_string(&tag, "type", "close");
+ 				add_assoc_long(&tag, "level", parser->level);
+ 

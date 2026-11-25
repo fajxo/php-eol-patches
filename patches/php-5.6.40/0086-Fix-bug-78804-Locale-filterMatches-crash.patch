@@ -1,0 +1,62 @@
+From dcc36b631f13a63399f94faf9cc31366c040bac2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michal=20Brng=C3=A1l?= <michal@brngal.sk>
+Date: Wed, 25 Nov 2026 18:34:28 +0100
+Subject: [PATCH] Fix bug #78804: Locale::filterMatches() crash
+
+Locale::filterMatches() treated only a zero result of the tag
+canonicalisation as failure; a negative one (e.g. for 'und') went on
+with an unset buffer, and filterMatches('en-US', 'und', true) crashed
+the worker. 5.6 never got the 7.2.26 fix.
+
+Backport of php-src 2c9926f156 (Stanislav Malyshev), Sury's 5.6 patch
+0384.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ext/intl/locale/locale_methods.c |  4 ++--
+ ext/intl/tests/bug78804.phpt     | 13 +++++++++++++
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+ create mode 100644 ext/intl/tests/bug78804.phpt
+
+diff --git a/ext/intl/locale/locale_methods.c b/ext/intl/locale/locale_methods.c
+index 34d148b1..0d9ff380 100644
+--- a/ext/intl/locale/locale_methods.c
++++ b/ext/intl/locale/locale_methods.c
+@@ -1283,7 +1283,7 @@ PHP_FUNCTION(locale_filter_matches)
+ 	if( boolCanonical ){
+ 		/* canonicalize loc_range */
+ 		can_loc_range=get_icu_value_internal( loc_range , LOC_CANONICALIZE_TAG , &result , 0);
+-		if( result ==0) {
++		if( result <=0) {
+ 			intl_error_set( NULL, status,
+ 				"locale_filter_matches : unable to canonicalize loc_range" , 0 TSRMLS_CC );
+ 			RETURN_FALSE;
+@@ -1291,7 +1291,7 @@ PHP_FUNCTION(locale_filter_matches)
+ 
+ 		/* canonicalize lang_tag */
+ 		can_lang_tag = get_icu_value_internal( lang_tag , LOC_CANONICALIZE_TAG , &result ,  0);
+-		if( result ==0) {
++		if( result <=0) {
+ 			intl_error_set( NULL, status,
+ 				"locale_filter_matches : unable to canonicalize lang_tag" , 0 TSRMLS_CC );
+ 			RETURN_FALSE;
+diff --git a/ext/intl/tests/bug78804.phpt b/ext/intl/tests/bug78804.phpt
+new file mode 100644
+index 00000000..b0d58ec4
+--- /dev/null
++++ b/ext/intl/tests/bug78804.phpt
+@@ -0,0 +1,13 @@
++--TEST--
++Bug #78804: Segmentation fault in Locale::filterMatches
++--FILE--
++<?php
++
++if (Locale::filterMatches('en-US', 'und', true)) {
++    echo 'Matches';
++} else {
++    echo 'Not matches';
++}
++?>
++--EXPECT--
++Not matches
+\ No newline at end of file
