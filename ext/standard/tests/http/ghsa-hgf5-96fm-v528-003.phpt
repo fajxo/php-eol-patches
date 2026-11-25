@@ -17,7 +17,10 @@ $serverCode = <<<'CODE'
 
     phpt_notify(WORKER_DEFAULT_NAME, "server-accepted");
 
-    $result = fread($conn, 1024);
+    $result = '';
+    while (strpos($result, "\r\n\r\n") === false && !feof($conn)) {
+        $result .= fread($conn, 1024);
+    }
     $encoded_result = base64_encode($result);
 
     fwrite($conn, "HTTP/1.0 200 Ok\r\nContent-Type: text/html; charset=utf-8\r\n\r\n$encoded_result\r\n");
@@ -36,7 +39,7 @@ $clientCode = <<<'CODE'
     var_dump($http_response_header);
 CODE;
 
-include sprintf("%s/../../../openssl/tests/ServerClientTestCase.inc", __DIR__);
+include sprintf("%s/ServerClientTestCase.inc", __DIR__);
 ServerClientTestCase::getInstance()->run($clientCode, $serverCode);
 ?>
 --EXPECTF--
