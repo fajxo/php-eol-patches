@@ -73,6 +73,7 @@
 #include "php_fopen_wrappers.h"
 
 #define HTTP_HEADER_BLOCK_SIZE		1024
+#define HTTP_HEADER_MAX_LOCATION_SIZE	8182 /* 8192 - 10 (size of "Location: ") */
 #define PHP_URL_REDIRECT_MAX		20
 #define HTTP_HEADER_USER_AGENT		1
 #define HTTP_HEADER_HOST			2
@@ -167,17 +168,15 @@ typedef struct _php_stream_http_response_header_info {
 	size_t file_size;
 	zend_bool error;
 	int follow_location;
-	char location[HTTP_HEADER_BLOCK_SIZE];
+	char *location;
+	size_t location_len;
 } php_stream_http_response_header_info;
 
 static void php_stream_http_response_header_info_init(
 		php_stream_http_response_header_info *header_info)
 {
-	header_info->transfer_encoding = NULL;
-	header_info->file_size = 0;
-	header_info->error = 0;
+	memset(header_info, 0, sizeof(php_stream_http_response_header_info));
 	header_info->follow_location = 1;
-	header_info->location[0] = '\0';
 }
 
 /* Trim white spaces from response header line and update its length */
@@ -226,6 +225,7 @@ static zend_bool php_stream_http_response_headers_parse(php_stream_wrapper *wrap
 	char *last_header_line = *last_header_line_ptr;
 	size_t last_header_line_length = *last_header_line_length_ptr;
 	char *last_header_line_end, *last_header_value;
+	size_t last_header_value_len;
 	zend_bool store_header = 1;
 	zval **tmpzval = NULL;
 
@@ -317,7 +317,22 @@ static zend_bool php_stream_http_response_headers_parse(php_stream_wrapper *wrap
 			 * RFC 7238 defines 308: http://tools.ietf.org/html/rfc7238 */
 			header_info->follow_location = 0;
 		}
-		strlcpy(header_info->location, last_header_value, sizeof(header_info->location));
+		last_header_value_len = strlen(last_header_value);
+		if (last_header_value_len > HTTP_HEADER_MAX_LOCATION_SIZE) {
+			header_info->error = 1;
+			php_stream_wrapper_log_error(wrapper, options TSRMLS_CC,
+					"HTTP Location header size is over the limit of %d bytes",
+					HTTP_HEADER_MAX_LOCATION_SIZE);
+			efree(last_header_line);
+			return 0;
+		}
+		if (header_info->location_len == 0) {
+			header_info->location = emalloc(last_header_value_len + 1);
+		} else if (header_info->location_len <= last_header_value_len) {
+			header_info->location = erealloc(header_info->location, last_header_value_len + 1);
+		}
+		header_info->location_len = last_header_value_len;
+		memcpy(header_info->location, last_header_value, last_header_value_len + 1);
 	} else if (!strncasecmp(last_header_line, "Content-Type:", sizeof("Content-Type:")-1)) {
 		php_stream_notify_info(context, PHP_STREAM_NOTIFY_MIME_TYPE_IS, last_header_value, 0);
 	} else if (!strncasecmp(last_header_line, "Content-Length:", sizeof("Content-Length:")-1)) {
@@ -1084,12 +1099,12 @@ finish:
 				response_code, response_header, &header_info TSRMLS_CC);
 	}
 
-	if (!reqok || (header_info.location[0] != '\0' && header_info.follow_location)) {
+	if (!reqok || (header_info.location != NULL && header_info.follow_location)) {
 		if (!header_info.follow_location || (((options & STREAM_ONLY_GET_HEADERS) || ignore_errors) && redirect_max <= 1)) {
 			goto out;
 		}
 
-		if (header_info.location[0] != '\0')
+		if (header_info.location != NULL)
 			php_stream_notify_info(context, PHP_STREAM_NOTIFY_REDIRECTED, header_info.location, 0);
 
 		php_stream_close(stream);
@@ -1100,18 +1115,17 @@ finish:
 			header_info.transfer_encoding = NULL;
 		}
 
-		if (header_info.location[0] != '\0') {
+		if (header_info.location != NULL) {
 
-			char new_path[HTTP_HEADER_BLOCK_SIZE];
-			char loc_path[HTTP_HEADER_BLOCK_SIZE];
+			char *new_path = NULL;
 
-			*new_path='\0';
 			if (strlen(header_info.location) < 8 ||
 					(strncasecmp(header_info.location, "http://", sizeof("http://")-1) &&
 							strncasecmp(header_info.location, "https://", sizeof("https://")-1) &&
 							strncasecmp(header_info.location, "ftp://", sizeof("ftp://")-1) &&
 							strncasecmp(header_info.location, "ftps://", sizeof("ftps://")-1)))
 			{
+				char *loc_path = NULL;
 				if (*header_info.location != '/') {
 					if (*(header_info.location+1) != '\0' && resource->path) {
 						char *s = strrchr(resource->path, '/');
@@ -1126,28 +1140,32 @@ finish:
 						}
 						s[1] = '\0';
 						if (resource->path && *(resource->path) == '/' && *(resource->path + 1) == '\0') {
-							snprintf(loc_path, sizeof(loc_path) - 1, "%s%s", resource->path, header_info.location);
+							spprintf(&loc_path, 0, "%s%s", resource->path, header_info.location);
 						} else {
-							snprintf(loc_path, sizeof(loc_path) - 1, "%s/%s", resource->path, header_info.location);
+							spprintf(&loc_path, 0, "%s/%s", resource->path, header_info.location);
 						}
 					} else {
-						snprintf(loc_path, sizeof(loc_path) - 1, "/%s", header_info.location);
+						spprintf(&loc_path, 0, "/%s", header_info.location);
 					}
 				} else {
-					strlcpy(loc_path, header_info.location, sizeof(loc_path));
+					loc_path = header_info.location;
+					header_info.location = NULL;
 				}
 				if ((use_ssl && resource->port != 443) || (!use_ssl && resource->port != 80)) {
-					snprintf(new_path, sizeof(new_path) - 1, "%s://%s:%d%s", resource->scheme, resource->host, resource->port, loc_path);
+					spprintf(&new_path, 0, "%s://%s:%d%s", resource->scheme, resource->host, resource->port, loc_path);
 				} else {
-					snprintf(new_path, sizeof(new_path) - 1, "%s://%s%s", resource->scheme, resource->host, loc_path);
+					spprintf(&new_path, 0, "%s://%s%s", resource->scheme, resource->host, loc_path);
 				}
+				efree(loc_path);
 			} else {
-				strlcpy(new_path, header_info.location, sizeof(new_path));
+				new_path = header_info.location;
+				header_info.location = NULL;
 			}
 
 			php_url *new_resource = php_url_parse(new_path);
 			if (new_resource == NULL) {
 				php_stream_wrapper_log_error(wrapper, options TSRMLS_CC, "Invalid redirect URL! %s", new_path);
+				efree(new_path);
 				goto out;
 			}
 
@@ -1171,6 +1189,7 @@ finish:
 		while (s < e) { \
 			if (iscntrl(*s)) { \
 				php_stream_wrapper_log_error(wrapper, options TSRMLS_CC, "Invalid redirect URL! %s", new_path); \
+				efree(new_path); \
 				goto out; \
 			} \
 			s++; \
@@ -1188,6 +1207,7 @@ finish:
 				new_flags |= HTTP_WRAPPER_STRIP_AUTH;
 			}
 			stream = php_stream_url_wrap_http_ex(wrapper, new_path, mode, options, opened_path, context, --redirect_max, new_flags STREAMS_CC TSRMLS_CC);
+			efree(new_path);
 		} else {
 			php_stream_wrapper_log_error(wrapper, options TSRMLS_CC, "HTTP request failed! %s", tmp_line);
 		}
@@ -1203,6 +1223,10 @@ out:
 
 	if (last_header_line) {
 		efree(last_header_line);
+	}
+
+	if (header_info.location != NULL) {
+		efree(header_info.location);
 	}
 
 	if (scratch) {
